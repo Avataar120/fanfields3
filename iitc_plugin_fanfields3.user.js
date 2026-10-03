@@ -814,20 +814,47 @@ function wrapper(plugin_info) {
     if (routeOrder) return routeOrder;
 
     var guids = thisplugin.displayOrderGuids;
-    if (!guids || guids.length !== sorted.length) return sorted;
+    var order = sorted;
+    if (guids && guids.length === sorted.length) {
+      var byGuid = {};
+      sorted.forEach(function (fp) { byGuid[fp.guid] = fp; });
 
-    var byGuid = {};
-    sorted.forEach(function (fp) { byGuid[fp.guid] = fp; });
-
-    var reordered = [];
-    for (var i = 0; i < guids.length; i++) {
-      var fp = byGuid[guids[i]];
-      if (!fp) return sorted; // stale guid set (plan changed since) — ignore it
-      reordered.push(fp);
+      var reordered = [];
+      for (var i = 0; i < guids.length; i++) {
+        var fp = byGuid[guids[i]];
+        if (!fp) { reordered = null; break; } // stale guid set (plan changed since) — ignore it
+        reordered.push(fp);
+      }
+      if (reordered && reordered[0].guid === thisplugin.startingpointGUID) order = reordered; // anchor must stay first
     }
-    if (reordered[0].guid !== thisplugin.startingpointGUID) return sorted; // anchor must stay first
 
-    return reordered;
+    return thisplugin.moveAnchorAfterItsTargetsIfOutbound(order);
+  };
+
+  // Outbound (RADIATING) mode: throwing one of the anchor's own links needs a key to that
+  // destination, which only comes from having visited (and resonated) it already. So the anchor
+  // has to come right after the last of its own direct outbound targets in the walk — not first,
+  // like in inbound (CENTRALIZING) mode, where its keys are farmed before walking out — but also
+  // not necessarily last overall: a portal the anchor never links to directly can still come
+  // after it. Walk/display order only; sortedFanpoints (build order) is untouched, and an active
+  // Route order already models this via its own precedences.
+  thisplugin.moveAnchorAfterItsTargetsIfOutbound = function (order) {
+    if (thisplugin.stardirection !== thisplugin.starDirENUM.RADIATING) return order;
+    if (!order || order.length <= 1) return order;
+
+    var anchor = order[0];
+    if (anchor.guid !== thisplugin.startingpointGUID) return order; // already not anchor-first
+
+    var targetGuids = {};
+    (anchor.outgoing || []).forEach(function (target) { targetGuids[target.guid] = true; });
+    if (Object.keys(targetGuids).length === 0) return order; // nothing to link from the anchor
+
+    var rest = order.slice(1);
+    var lastTargetIdx = -1;
+    rest.forEach(function (fp, idx) { if (targetGuids[fp.guid]) lastTargetIdx = idx; });
+    if (lastTargetIdx === -1) return order; // targets not found in this order — leave as is
+
+    return rest.slice(0, lastTargetIdx + 1).concat([anchor]).concat(rest.slice(lastTargetIdx + 1));
   };
 
   // Identifies the plan's shape: its portals in build order, each with the portals it throws to.
@@ -880,6 +907,7 @@ function wrapper(plugin_info) {
     // Reset manual order and link flips because the start/anchor changed (ghi#23)
     thisplugin.manualOrderGuids = null;
     thisplugin.manualLinkFlips = {};
+    thisplugin.reconciledFanLinkKeys = {};
     thisplugin.relocatedForLessWalkingGuids = {};
     thisplugin.displayOrderGuids = null;
     thisplugin.requestLinkOrderRecompute();
@@ -922,6 +950,7 @@ function wrapper(plugin_info) {
     // cycling via updateStartingPoint.
     thisplugin.manualOrderGuids = null;
     thisplugin.manualLinkFlips = {};
+    thisplugin.reconciledFanLinkKeys = {};
     thisplugin.relocatedForLessWalkingGuids = {};
     thisplugin.displayOrderGuids = null;
     thisplugin.requestLinkOrderRecompute();
@@ -3652,6 +3681,7 @@ function wrapper(plugin_info) {
     // Reset the order and link flips – new geometry, new base ordering (ghi#23)
     thisplugin.manualOrderGuids = null;
     thisplugin.manualLinkFlips = {};
+    thisplugin.reconciledFanLinkKeys = {};
     thisplugin.relocatedForLessWalkingGuids = {};
     thisplugin.displayOrderGuids = null;
     thisplugin.requestLinkOrderRecompute();
@@ -4336,12 +4366,10 @@ function wrapper(plugin_info) {
                 font-size: 12px;
                 letter-spacing: 1px;
                 user-select: none;
-                ${L.Browser.mobile ? `
                 max-width: 40px !important;
                 white-space: normal !important;
                 word-break: break-all !important;
                 overflow-wrap: break-word !important;
-                ` : ''}
               }
             `);
 
@@ -4455,6 +4483,63 @@ function wrapper(plugin_info) {
     if (!pointA || !pointB) return false;
 
     return !!thisplugin.ownLinkKeys[thisplugin.pointPairKey(pointA, pointB)];
+  };
+
+  // Which way a real in-game link between these two guids was actually thrown (own faction
+  // only), as { oGuid, dGuid } — or null if there is no such link. Unlike isLinkInGame, which is
+  // direction-agnostic, this is what thisplugin.reconcileAnchorFanLinkDirections needs to tell a
+  // link thrown as planned from one thrown the other way round.
+  thisplugin.getRealLinkDirection = function (guidA, guidB) {
+    var ownTeam = thisplugin.getOwnFactionTeam();
+    if (ownTeam === undefined) return null;
+
+    for (var guid in thisplugin.intelLinks) {
+      var link = thisplugin.intelLinks[guid];
+      if (link.team !== ownTeam || !link.guidA || !link.guidB) continue;
+      if ((link.guidA === guidA && link.guidB === guidB) || (link.guidA === guidB && link.guidB === guidA)) {
+        return { oGuid: link.guidA, dGuid: link.guidB };
+      }
+    }
+    return null;
+  };
+
+  // Outbound (RADIATING) mode only: standing at the anchor, you can only throw links FROM it, so
+  // a fan link the plan expects INBOUND (still to be thrown at the anchor) that's already live
+  // in-game can only have been thrown the other way round — an extra outbound use the SBUL-
+  // derived capacity (8 + 8*availableSBUL) didn't budget for. To keep the real + still-planned
+  // outbound count at that maximum rather than overshoot it, this flips one not-yet-thrown
+  // planned-outbound fan link to inbound instead, exactly once per reversed link (tracked via
+  // thisplugin.reconciledFanLinkKeys so later refreshes don't keep picking a new victim for the
+  // same already-compensated reversal). Returns true when it changed manualLinkFlips, so the
+  // caller knows to rebuild the plan once more before displaying it.
+  thisplugin.reconciledFanLinkKeys = thisplugin.reconciledFanLinkKeys || {};
+  thisplugin.reconcileAnchorFanLinkDirections = function (sortedFanpoints) {
+    if (thisplugin.stardirection !== thisplugin.starDirENUM.RADIATING) return false;
+    if (!sortedFanpoints || sortedFanpoints.length < 2) return false;
+
+    var anchor = sortedFanpoints[0];
+    if (!anchor || anchor.guid !== thisplugin.startingpointGUID) return false;
+
+    var changed = false;
+    (anchor.incoming || []).forEach(function (partner) {
+      var key = thisplugin.getUndirectedLinkKey(anchor.guid, partner.guid);
+      if (thisplugin.reconciledFanLinkKeys[key]) return;
+
+      var real = thisplugin.getRealLinkDirection(anchor.guid, partner.guid);
+      if (!real || real.oGuid !== anchor.guid) return; // not thrown yet, or thrown the planned way
+
+      var victim = (anchor.outgoing || []).filter(function (target) {
+        return !thisplugin.isLinkFlipped(anchor.guid, target.guid) &&
+          !thisplugin.getRealLinkDirection(anchor.guid, target.guid);
+      })[0];
+      if (!victim) return; // nothing left to compensate with this cycle
+
+      thisplugin.manualLinkFlips[thisplugin.getUndirectedLinkKey(anchor.guid, victim.guid)] = true;
+      thisplugin.reconciledFanLinkKeys[key] = true;
+      changed = true;
+    });
+
+    return changed;
   };
 
   // The player's own faction's in-game links joining two of these fanpoints (guid -> projected
@@ -4601,6 +4686,7 @@ function wrapper(plugin_info) {
 
       // The anchor changed, so flips and relocations made for the previous one no longer apply.
       thisplugin.manualLinkFlips = {};
+      thisplugin.reconciledFanLinkKeys = {};
       thisplugin.relocatedForLessWalkingGuids = {};
       thisplugin.displayOrderGuids = null;
       thisplugin.requestLinkOrderRecompute();
@@ -4866,6 +4952,7 @@ function wrapper(plugin_info) {
   // base algorithm.
   thisplugin.resetLinkFlips = function () {
     thisplugin.manualLinkFlips = {};
+    thisplugin.reconciledFanLinkKeys = {};
     thisplugin.clearRouteOrder();
     thisplugin.relocatedForLessWalkingGuids = {};
     thisplugin.displayOrderGuids = null; // never the user's own Manage Portal Order (manualOrderGuids)
@@ -6267,6 +6354,7 @@ function wrapper(plugin_info) {
       thisplugin.lastPlanSignature !== currentSignature) {
 
       thisplugin.manualLinkFlips = {};
+      thisplugin.reconciledFanLinkKeys = {};
       thisplugin.relocatedForLessWalkingGuids = {};
       thisplugin.displayOrderGuids = null;
       thisplugin.requestLinkOrderRecompute();
@@ -6586,7 +6674,11 @@ function wrapper(plugin_info) {
 
           if (pb === 0) {
             maxLinks = 8 + thisplugin.availableSBUL * 8;
-            wantOutbound = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) || flipped;
+            // flipped toggles away from the mode's default direction either way: in CENTRALIZING
+            // (default inbound) it tries outbound, and in RADIATING (default outbound) it now
+            // forces inbound instead — used by thisplugin.reconcileAnchorFanLinkDirections to
+            // compensate for a link actually thrown the other way round.
+            wantOutbound = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) !== flipped;
             if (wantOutbound && localCenterOutgoings < maxLinks) {
               outbound = 1;
             } else {
@@ -6735,17 +6827,26 @@ function wrapper(plugin_info) {
         }
       }
 
-      var builtPlan = buildFanPlan(thisplugin.perimeterpoints[thisplugin.startingpointIndex][0], thisplugin.is_clockwise);
-      thisplugin.startingpointGUID = builtPlan.startingpointGUID;
-      thisplugin.startingpoint = builtPlan.startingpoint;
-      this.sortedFanpoints = builtPlan.sortedFanpoints;
-      donelinks = builtPlan.donelinks;
-      triangles = builtPlan.triangles;
-      n = builtPlan.n;
-      centerOutgoings = builtPlan.centerOutgoings;
-      centerSbul = builtPlan.centerSbul;
-      thisplugin.centerKeys = builtPlan.centerKeys;
+      function applyBuiltPlan(plan) {
+        thisplugin.startingpointGUID = plan.startingpointGUID;
+        thisplugin.startingpoint = plan.startingpoint;
+        this.sortedFanpoints = plan.sortedFanpoints;
+        donelinks = plan.donelinks;
+        triangles = plan.triangles;
+        n = plan.n;
+        centerOutgoings = plan.centerOutgoings;
+        centerSbul = plan.centerSbul;
+        thisplugin.centerKeys = plan.centerKeys;
+      }
+
+      applyBuiltPlan.call(this, buildFanPlan(thisplugin.perimeterpoints[thisplugin.startingpointIndex][0], thisplugin.is_clockwise));
       thisplugin.saveCurrentAnchor();
+
+      // A fan link thrown the opposite way from planned (see reconcileAnchorFanLinkDirections)
+      // changes manualLinkFlips, so the plan needs rebuilding once more to reflect it.
+      if (thisplugin.reconcileAnchorFanLinkDirections(this.sortedFanpoints)) {
+        applyBuiltPlan.call(this, buildFanPlan(thisplugin.perimeterpoints[thisplugin.startingpointIndex][0], thisplugin.is_clockwise));
+      }
     }
 
     $.each(donelinks, function (i, link) {
