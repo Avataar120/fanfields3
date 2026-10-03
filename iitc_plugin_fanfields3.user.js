@@ -1643,8 +1643,19 @@ function wrapper(plugin_info) {
           if (outPortal.portal !== undefined) {
             outPortalTitle = outPortal.portal.options.data.title;
           }
-          // Portal Name (Target)
-          linkDetailText += '<td>' + outPortalTitle + '</td>';
+          let outTitle = window.escapeHtmlSpecialChars(outPortalTitle);
+          let outUriTitle = encodeURIComponent(outPortalTitle);
+          let outLatlng = map.unproject(outPortal.point, thisplugin.PROJECT_ZOOM);
+          let outLat = Math.round(outLatlng.lat * 10000000) / 10000000;
+          let outLng = Math.round(outLatlng.lng * 10000000) / 10000000;
+          let outGmapsHref = `https://www.google.com/maps/dir/?api=1&destination=${outLat},${outLng}&query_destination_id=(${outUriTitle})`;
+
+          // Portal Name (Target) — same print/UI link pair as the main portal row.
+          linkDetailText += '<td>';
+          linkDetailText += `  <a class="plugin_fanfields3_exportText_print" href="${outGmapsHref}" target="_blank">${outTitle}</a>`;
+          linkDetailText +=
+            `  <a class="plugin_fanfields3_exportText_ui" onclick="window.plugin.fanfields.flyToPortal({lat: ${outLat}, lng: ${outLng}}, '${outPortal.guid}'); return false;">${outTitle}</a>`;
+          linkDetailText += '</td>';
 
           // Keys (here: empty cell)
           linkDetailText += '<td></td>';
