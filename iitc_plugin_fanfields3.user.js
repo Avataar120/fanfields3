@@ -7992,7 +7992,16 @@ function wrapper(plugin_info) {
   thisplugin.onLiveDataChanged = function (wait) {
     if (thisplugin.is_locked) {
       thisplugin.refreshLiveGameData();
-      thisplugin.redrawWalkOrder();
+
+      // A fan link thrown the opposite way from planned (see reconcileAnchorFanLinkDirections)
+      // changes manualLinkFlips and needs a full rebuild to apply — same bypass the Task List's
+      // own manual flip button (toggleLinkFlip) already uses regardless of the lock, since this
+      // is the same kind of change: one link's direction, not the plan's structure.
+      if (thisplugin.reconcileAnchorFanLinkDirections(thisplugin.sortedFanpoints)) {
+        thisplugin.updateLayer();
+      } else {
+        thisplugin.redrawWalkOrder();
+      }
     } else {
       thisplugin.delayedUpdateLayer(wait);
     }
