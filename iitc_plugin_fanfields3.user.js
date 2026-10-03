@@ -7587,14 +7587,14 @@ function wrapper(plugin_info) {
       }
       var isInvalid = (linkKey && thisplugin.invalidUnderFieldLinks && thisplugin.invalidUnderFieldLinks[linkKey]);
 
-      // Already thrown in-game for our faction? Fade it to a muted brownish-red on the map,
-      // so only links still left to throw stay bright red — mirrors the Task List's own
+      // Already thrown in-game for our faction? Fade it to a muted purple on the map,
+      // so only links still left to throw stay bright purple — mirrors the Task List's own
       // "Grey out done links" toggle (isLinkInGame), rather than a separate switch.
       var isDone = thisplugin.greyOutExistingLinks && edge.guidA && edge.guidB &&
         thisplugin.isLinkInGame(edge.guidA, edge.guidB);
 
       var baseStyle = {
-        color: isDone ? '#8B3A3A' : '#FF0000',
+        color: isDone ? '#5B3A6B' : '#8E44AD',
         opacity: isDone ? 0.5 : 1,
         weight: 1.5,
         clickable: false,
