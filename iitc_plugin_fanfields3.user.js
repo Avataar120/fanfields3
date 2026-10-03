@@ -5201,15 +5201,51 @@ function wrapper(plugin_info) {
   // indexOwnLinks() whenever thisplugin.intelLinks is (re)built.
   thisplugin.ownLinkKeys = {};
 
+  // Throwing a link spends a key to its destination portal. Whenever indexOwnLinks() finds an
+  // own-faction link that wasn't there the previous time (newKeys has it, thisplugin.ownLinkKeys
+  // — the previous run's set — doesn't), that key is now spent: the Keys plugin's own count for
+  // that destination (destByKey) is decremented by 1, never below 0. Skipped on the very first
+  // run (thisplugin._ownLinksBaselineSet still false): with no previous set to compare against,
+  // every link already in-game would otherwise look "new" and get wrongly decremented. Only
+  // window.plugin.keys is touched — LiveInventory is a read-only reflection of the real
+  // inventory and has no such API (same restriction as thisplugin.toggleKeysPluginCount).
+  // Options dialog toggle ("Spend keys on throw"): on by default.
+  thisplugin._ownLinksBaselineSet = false;
+  thisplugin.consumeKeysOnLinkThrown = true;
+
+  thisplugin.consumeKeysForNewLinks = function (newKeys, destByKey) {
+    if (!thisplugin._ownLinksBaselineSet) {
+      thisplugin._ownLinksBaselineSet = true;
+      return;
+    }
+    if (!thisplugin.consumeKeysOnLinkThrown) return;
+    if (!window.plugin.keys || typeof window.plugin.keys.addKey !== 'function') return;
+
+    var oldKeys = thisplugin.ownLinkKeys || {};
+    for (var key in newKeys) {
+      if (oldKeys[key]) continue; // not a newly thrown link
+      var destGuid = destByKey[key];
+      if (!destGuid) continue;
+      var current = window.plugin.keys.keys[destGuid] || 0;
+      if (current > 0) window.plugin.keys.addKey(-1, destGuid);
+    }
+  };
+
   thisplugin.indexOwnLinks = function () {
     var keys = {};
+    var destByKey = {};
     var ownTeam = thisplugin.getOwnFactionTeam();
     if (ownTeam !== undefined) {
       for (var guid in thisplugin.intelLinks) {
         var link = thisplugin.intelLinks[guid];
-        if (link.team === ownTeam) keys[thisplugin.pointPairKey(link.a, link.b)] = true;
+        if (link.team === ownTeam) {
+          var key = thisplugin.pointPairKey(link.a, link.b);
+          keys[key] = true;
+          if (link.guidB) destByKey[key] = link.guidB;
+        }
       }
     }
+    thisplugin.consumeKeysForNewLinks(keys, destByKey);
     thisplugin.ownLinkKeys = keys;
   };
 
@@ -8171,7 +8207,8 @@ function wrapper(plugin_info) {
       useBookmarksOnly: thisplugin.use_bookmarks_only,
       manageBlockers: thisplugin.manageBlockers,
       blockerMaxDetourM: thisplugin.blockerMaxDetourM,
-      walkSimShowLinks: thisplugin.walkSimShowLinks
+      walkSimShowLinks: thisplugin.walkSimShowLinks,
+      consumeKeysOnLinkThrown: thisplugin.consumeKeysOnLinkThrown
     };
   };
 
@@ -8188,6 +8225,7 @@ function wrapper(plugin_info) {
     if (typeof saved.manageBlockers === 'boolean') thisplugin.manageBlockers = saved.manageBlockers;
     if (typeof saved.blockerMaxDetourM === 'number') thisplugin.blockerMaxDetourM = saved.blockerMaxDetourM;
     if (typeof saved.walkSimShowLinks === 'boolean') thisplugin.walkSimShowLinks = saved.walkSimShowLinks;
+    if (typeof saved.consumeKeysOnLinkThrown === 'boolean') thisplugin.consumeKeysOnLinkThrown = saved.consumeKeysOnLinkThrown;
   };
 
   // The current anchor, persisted continuously (every updateLayer() run — see where
@@ -8298,6 +8336,13 @@ function wrapper(plugin_info) {
       '<option value="off"' + (!thisplugin.walkSimShowLinks ? ' selected' : '') + '>Off</option>' +
       '</select></div>';
 
+    html += '<div class="plugin_fanfields3_options_row">' +
+      '<label for="plugin_fanfields3_opt_spendkeys" title="When a link is detected as newly thrown in-game, remove one key for its destination portal from the Keys plugin (never below 0)">Spend&nbsp;keys&nbsp;on&nbsp;throw</label>' +
+      '<select id="plugin_fanfields3_opt_spendkeys">' +
+      '<option value="on"' + (thisplugin.consumeKeysOnLinkThrown ? ' selected' : '') + '>On</option>' +
+      '<option value="off"' + (!thisplugin.consumeKeysOnLinkThrown ? ' selected' : '') + '>Off</option>' +
+      '</select></div>';
+
     html += '</div>';
 
     var width = 380;
@@ -8355,6 +8400,11 @@ function wrapper(plugin_info) {
 
     $('#plugin_fanfields3_opt_walksim_links').on('change', function () {
       thisplugin.walkSimShowLinks = ($(this).val() === 'on');
+      thisplugin.saveOptionsDefault();
+    });
+
+    $('#plugin_fanfields3_opt_spendkeys').on('change', function () {
+      thisplugin.consumeKeysOnLinkThrown = ($(this).val() === 'on');
       thisplugin.saveOptionsDefault();
     });
   };
