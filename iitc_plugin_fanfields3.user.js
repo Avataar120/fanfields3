@@ -681,7 +681,7 @@ function wrapper(plugin_info) {
   // from it, so an anchor OFF the hull sticks around across recalculations exactly like a hull
   // one. null means "no pin" — the algorithm's own hull-based choice (or the marker, if any)
   // applies as usual. Set two ways:
-  //  - thisplugin.setAnchorByGuid (the "Pick anchor" button): an explicit user choice —
+  //  - thisplugin.setAnchorByGuid (the "Pick anchor" menu entry): an explicit user choice —
   //    thisplugin.forcedAnchorIsManual is set alongside it, so the auto-orientation search
   //    below never silently overrides it on a later polygon edit.
   //  - the auto-orientation search itself, for its own best pick when that pick isn't a hull
@@ -693,8 +693,23 @@ function wrapper(plugin_info) {
   thisplugin.forcedAnchorIsManual = false;
 
   // Whether the next portal click on the map should set that portal as the anchor (see the
-  // Pick anchor sidebar button and the portalSelected hook in setup()).
+  // Pick anchor menu entry and the portalSelected hook in setup()).
   thisplugin.isPickingAnchor = false;
+
+  // "No entry" shortcut: while armed, clicking a plan portal on the map marks it to be left out
+  // of the plan (or, clicked again, puts it back in) — see thisplugin.toggleExcludedPortal and
+  // the portalSelected hook in setup(). Nothing is recalculated while armed; the plan itself is
+  // only rebuilt once the shortcut is clicked again to disarm it (thisplugin.togglePortalExclusionMode).
+  thisplugin.isExcludingPortals = false;
+  // guid -> true for every portal manually excluded this way. Applied in updateLayer() right
+  // after the plan's own candidate portal set is computed, and dropped whenever that candidate
+  // set itself actually changes (a new/edited polygon, Bookmarks-only, …) — see the
+  // lastPlanSignature check there.
+  thisplugin.excludedPortalGuids = {};
+  // guid -> the no-entry marker currently shown for it, so a single click can add/remove just
+  // that one marker without touching the rest of the plan's own drawing.
+  thisplugin.excludedPortalMarkers = {};
+  thisplugin.excludedPortalMarkersLayerGroup = null;
 
 
 
@@ -1173,7 +1188,7 @@ function wrapper(plugin_info) {
     return true;
   };
 
-  // "Pick anchor" sidebar button: toggles whether the next portal click on the map sets that
+  // "Pick anchor" menu entry: toggles whether the next portal click on the map sets that
   // portal as the anchor (see the portalSelected hook in setup()).
   thisplugin.toggleAnchorPicking = function () {
     thisplugin.isPickingAnchor = !thisplugin.isPickingAnchor;
@@ -1181,8 +1196,122 @@ function wrapper(plugin_info) {
   };
 
   thisplugin.updateAnchorPickingButton = function () {
-    $('#plugin_fanfields3_pickanchor_btn, #fanfieldPickAnchorButton')
+    $('#plugin_fanfields3_pickanchor_btn')
       .toggleClass('plugin_fanfields3_active', thisplugin.isPickingAnchor);
+  };
+
+  // "No entry" shortcut: arms/disarms portal-exclusion picking. Disarming applies whatever was
+  // toggled while armed (thisplugin.excludedPortalGuids) to the actual plan — the same
+  // unlock-then-recalculate-then-relock cycle used by the other option toggles (toggleclockwise,
+  // toggleStarDirection, …) — via thisplugin.delayedUpdateLayer(..., true).
+  thisplugin.togglePortalExclusionMode = function () {
+    thisplugin.isExcludingPortals = !thisplugin.isExcludingPortals;
+    thisplugin.updateExcludePortalButton();
+
+    if (!thisplugin.isExcludingPortals) {
+      thisplugin.manualOrderGuids = null;
+      thisplugin.manualLinkFlips = {};
+      thisplugin.reconciledFanLinkKeys = {};
+      thisplugin.relocatedForLessWalkingGuids = {};
+      thisplugin.displayOrderGuids = null;
+      thisplugin.requestLinkOrderRecompute();
+      thisplugin.delayedUpdateLayer(0.2, true);
+    }
+  };
+
+  thisplugin.updateExcludePortalButton = function () {
+    $('#fanfieldExcludePortalButton')
+      .toggleClass('plugin_fanfields3_active', thisplugin.isExcludingPortals)
+      .attr('title', thisplugin.isExcludingPortals
+        ? 'Exclude portals: click plan portals to mark them out (or back in), click here again when done'
+        : 'Exclude portals: click, then click plan portals to leave them out of the plan');
+  };
+
+  // A single portal click can fire IITC's own 'portalSelected' hook twice in a row (observed on
+  // the very first click of a session: once right away, once again once the portal's full data
+  // arrives and renderPortalDetails re-runs for the same guid) — without this guard, that second
+  // call immediately undid the first click's toggle, making the marker flash and vanish. Genuine
+  // separate clicks on the same portal, to toggle it back, are comfortably slower than this.
+  thisplugin._lastExcludeToggleAt = {};
+  thisplugin.EXCLUDE_TOGGLE_DEBOUNCE_MS = 400;
+
+  // Marks/unmarks a single portal as excluded and updates its no-entry marker right away —
+  // called while picking is armed, never recalculates the plan itself (see
+  // thisplugin.togglePortalExclusionMode for that).
+  thisplugin.toggleExcludedPortal = function (guid) {
+    var now = Date.now();
+    var last = thisplugin._lastExcludeToggleAt[guid];
+    if (last !== undefined && (now - last) < thisplugin.EXCLUDE_TOGGLE_DEBOUNCE_MS) return;
+    thisplugin._lastExcludeToggleAt[guid] = now;
+
+    if (thisplugin.excludedPortalGuids[guid]) {
+      delete thisplugin.excludedPortalGuids[guid];
+      thisplugin.removeExcludedPortalMarker(guid);
+    } else {
+      thisplugin.excludedPortalGuids[guid] = true;
+      thisplugin.addExcludedPortalMarker(guid);
+    }
+  };
+
+  thisplugin.addExcludedPortalMarker = function (guid) {
+    if (!thisplugin.excludedPortalMarkersLayerGroup) return;
+    thisplugin.removeExcludedPortalMarker(guid);
+
+    var point = thisplugin.locations && thisplugin.locations[guid];
+    if (!point) return;
+
+    var marker = L.marker(map.unproject(point, thisplugin.PROJECT_ZOOM), {
+      icon: L.divIcon({
+        className: 'plugin_fanfields3_excluded_marker',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+        html: '&#9940;'
+      }),
+      interactive: false
+    });
+    marker.addTo(thisplugin.excludedPortalMarkersLayerGroup);
+    thisplugin.excludedPortalMarkers[guid] = marker;
+  };
+
+  thisplugin.removeExcludedPortalMarker = function (guid) {
+    var marker = thisplugin.excludedPortalMarkers[guid];
+    if (!marker) return;
+    if (thisplugin.excludedPortalMarkersLayerGroup) {
+      thisplugin.excludedPortalMarkersLayerGroup.removeLayer(marker);
+    }
+    delete thisplugin.excludedPortalMarkers[guid];
+  };
+
+  // Drops every manual exclusion and its marker — called when the plan's own candidate portal
+  // set actually changes (see the lastPlanSignature check in updateLayer()), since a stale
+  // exclusion would otherwise apply to a portal set it was never meant for.
+  thisplugin.clearExcludedPortals = function () {
+    Object.keys(thisplugin.excludedPortalMarkers).forEach(thisplugin.removeExcludedPortalMarker);
+    thisplugin.excludedPortalGuids = {};
+  };
+
+  // Sorted guids of every manually excluded portal — used wherever the exclusion set needs to
+  // be compared or persisted (Manage Ops' dirty-check and saved op data), so the same set always
+  // serializes identically regardless of the order portals were toggled in.
+  thisplugin.excludedGuidsArray = function () {
+    return Object.keys(thisplugin.excludedPortalGuids).sort();
+  };
+
+  // Replaces the whole exclusion set at once (Manage Ops' loadOp) — drops whatever was excluded
+  // before and marks exactly these guids instead.
+  thisplugin.setExcludedPortalGuids = function (guids) {
+    thisplugin.clearExcludedPortals();
+    (guids || []).forEach(function (guid) { thisplugin.excludedPortalGuids[guid] = true; });
+    thisplugin.refreshExcludedPortalMarkers();
+  };
+
+  // Adds a marker for every excluded portal that doesn't have one yet — called whenever
+  // thisplugin.locations is (re)built, since a portal restored from a saved op (or still
+  // loading in) may not have had a known location yet the first time it was excluded.
+  thisplugin.refreshExcludedPortalMarkers = function () {
+    Object.keys(thisplugin.excludedPortalGuids).forEach(function (guid) {
+      if (!thisplugin.excludedPortalMarkers[guid]) thisplugin.addExcludedPortalMarker(guid);
+    });
   };
 
   thisplugin.helpDialogWidth = 650;
@@ -3263,27 +3392,29 @@ function wrapper(plugin_info) {
   thisplugin.OPS_STORAGE_KEY = 'plugin-fanfields3-saved-ops';
   thisplugin.OPS_MAX_COUNT = 15;
 
-  // JSON snapshot of the drawing, options and anchor that matches whatever is currently
-  // considered "saved" (the op just loaded, saved or updated, or — see the pluginDrawTools
-  // hook in setup() — whatever was already on the map when IITC opened) — null until that
-  // baseline exists, in which case anything already on the map counts as unsaved. Shifting the
-  // anchor (even just Shift left/right) or changing an option counts as a change here too, not
-  // just editing the drawn shapes. Used only to warn before an op load would silently discard
-  // such changes; never persisted itself.
+  // JSON snapshot of the drawing, options, anchor and manual exclusions that matches whatever
+  // is currently considered "saved" (the op just loaded, saved or updated, or — see the
+  // pluginDrawTools hook in setup() — whatever was already on the map when IITC opened) — null
+  // until that baseline exists, in which case anything already on the map counts as unsaved.
+  // Shifting the anchor (even just Shift left/right), changing an option, or excluding/
+  // including a portal (the "No entry" shortcut) counts as a change here too, not just editing
+  // the drawn shapes. Used only to warn before an op load would silently discard such changes;
+  // never persisted itself.
   thisplugin.opsBaselineJSON = null;
 
-  // Snapshot of everything isDrawDirty() compares: the drawn shapes, the options and the
-  // anchor. `overrides` lets a caller pin a field to a specific value instead of the current
-  // live one — needed right after loadOp()/clearCurrentDraw()/the initial restore, where the
-  // anchor this op/restore is PINNING (op.anchor.guid, or null) is known immediately, but
-  // thisplugin.startingpointGUID itself only catches up once the debounced updateLayer() run
-  // that pluginDrawTools hook schedules actually completes.
+  // Snapshot of everything isDrawDirty() compares: the drawn shapes, the options, the anchor
+  // and the manually excluded portals. `overrides` lets a caller pin a field to a specific
+  // value instead of the current live one — needed right after loadOp()/clearCurrentDraw()/the
+  // initial restore, where the anchor this op/restore is PINNING (op.anchor.guid, or null) is
+  // known immediately, but thisplugin.startingpointGUID itself only catches up once the
+  // debounced updateLayer() run that pluginDrawTools hook schedules actually completes.
   thisplugin.buildWorkSnapshotJSON = function (overrides) {
     overrides = overrides || {};
     return JSON.stringify({
       data: overrides.data || thisplugin.serializeCurrentDraw(),
       options: overrides.options || thisplugin.getCurrentOptionsSnapshot(),
-      anchor: ('anchor' in overrides) ? overrides.anchor : (thisplugin.startingpointGUID || null)
+      anchor: ('anchor' in overrides) ? overrides.anchor : (thisplugin.startingpointGUID || null),
+      excluded: overrides.excluded || thisplugin.excludedGuidsArray()
     });
   };
 
@@ -3397,6 +3528,12 @@ function wrapper(plugin_info) {
 
     thisplugin.applyOptionsSnapshot(op.options);
 
+    // Restored ahead of the hook below (same reasoning as the anchor restore just below): the
+    // recalculation it triggers filters these guids out of the rebuilt plan as soon as it runs
+    // (see the excludedPortalGuids block in updateLayer), and their markers are drawn right
+    // away wherever thisplugin.locations already knows that portal.
+    thisplugin.setExcludedPortalGuids(op.excludedGuids);
+
     // Restored ahead of the hook below, so the recalculation it triggers pins this anchor the
     // same way setAnchorByGuid does (see the forcedAnchorGUID block in updateLayer) — dropped
     // back to null there if this op's anchor portal isn't part of its own drawing. Always
@@ -3411,9 +3548,13 @@ function wrapper(plugin_info) {
 
     // The anchor override here is this op's own pin, not thisplugin.startingpointGUID — that
     // only catches up once the debounced updateLayer() run the hook above just scheduled
-    // actually completes (see buildWorkSnapshotJSON). Options are already live: applied
-    // synchronously above.
-    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: op.data || [], anchor: (op.anchor && op.anchor.guid) || null });
+    // actually completes (see buildWorkSnapshotJSON). Options and exclusions are already live:
+    // applied synchronously above.
+    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({
+      data: op.data || [],
+      anchor: (op.anchor && op.anchor.guid) || null,
+      excluded: thisplugin.excludedGuidsArray()
+    });
 
     if (dt.drawnItems.getLayers().length) {
       map.fitBounds(dt.drawnItems.getBounds(), { maxZoom: 15, padding: [20, 20] });
@@ -3426,11 +3567,12 @@ function wrapper(plugin_info) {
   thisplugin.clearCurrentDraw = function () {
     var dt = window.plugin.drawTools;
     dt.drawnItems.clearLayers();
+    thisplugin.clearExcludedPortals(); // an empty drawing has no plan, so nothing can stay excluded from it
     if (typeof dt.save === 'function') dt.save();
     window.runHooks('pluginDrawTools', { event: 'import' });
     // anchor: null — an empty drawing has no plan, so none can be pinned; thisplugin.startingpointGUID
     // itself only catches up once the debounced updateLayer() run the hook above just scheduled completes.
-    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: [], anchor: null });
+    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: [], anchor: null, excluded: [] });
   };
 
   // Returns true on success, or a string identifying why it failed ('limit', 'duplicate').
@@ -3442,16 +3584,18 @@ function wrapper(plugin_info) {
     var data = thisplugin.serializeCurrentDraw();
     var options = thisplugin.getCurrentOptionsSnapshot();
     var anchor = thisplugin.startingpointGUID || null;
+    var excluded = thisplugin.excludedGuidsArray();
     ops.push({
       id: thisplugin.generateOpId(),
       name: name,
       data: data,
       options: options,
       anchor: { guid: anchor },
+      excludedGuids: excluded,
       savedAt: Date.now()
     });
     thisplugin.setSavedOps(ops);
-    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: data, options: options, anchor: anchor });
+    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: data, options: options, anchor: anchor, excluded: excluded });
     return true;
   };
 
@@ -3465,12 +3609,14 @@ function wrapper(plugin_info) {
     var data = thisplugin.serializeCurrentDraw();
     var options = thisplugin.getCurrentOptionsSnapshot();
     var anchor = thisplugin.startingpointGUID || null;
+    var excluded = thisplugin.excludedGuidsArray();
     op.data = data;
     op.options = options;
     op.anchor = { guid: anchor };
+    op.excludedGuids = excluded;
     op.savedAt = Date.now();
     thisplugin.setSavedOps(ops);
-    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: data, options: options, anchor: anchor });
+    thisplugin.opsBaselineJSON = thisplugin.buildWorkSnapshotJSON({ data: data, options: options, anchor: anchor, excluded: excluded });
     return true;
   };
 
@@ -4597,14 +4743,27 @@ function wrapper(plugin_info) {
       '}\n'
     );
 
-    // "Pick anchor" buttons (sidebar and the map's own topleft control): highlighted while
-    // armed (next portal click sets the anchor), so it reads as a toggle rather than a
-    // one-off action.
+    // "Pick anchor" sidebar button (kept for anything that still toggles it directly): highlighted
+    // while armed (next portal click sets the anchor), so it reads as a toggle rather than a
+    // one-off action. The map's own "No entry" shortcut (portal exclusion picking) gets the same
+    // highlight while armed.
     addCSS('\n' +
       '#plugin_fanfields3_pickanchor_btn.plugin_fanfields3_active,\n' +
-      '#fanfieldPickAnchorButton.plugin_fanfields3_active {\n' +
+      '#fanfieldExcludePortalButton.plugin_fanfields3_active {\n' +
       '  box-shadow: 0 0 0 2px #ffce00 inset;\n' +
       '  color: #ffce00;\n' +
+      '}\n'
+    );
+
+    // Marker for a portal manually excluded from the plan (the "No entry" shortcut).
+    addCSS('\n' +
+      '.plugin_fanfields3_excluded_marker {\n' +
+      '  color: #FF4444;\n' +
+      '  font-size: 20px;\n' +
+      '  line-height: 22px;\n' +
+      '  text-align: center;\n' +
+      '  text-shadow: 1px 1px #000, 1px -1px #000, -1px 1px #000, -1px -1px #000;\n' +
+      '  pointer-events: none;\n' +
       '}\n'
     );
 
@@ -6861,6 +7020,7 @@ function wrapper(plugin_info) {
       }
       thisplugin.locations[guid] = p;
     });
+    thisplugin.refreshExcludedPortalMarkers();
 
     thisplugin.intelLinks = {};
     $.each(window.links, function (guid, link) {
@@ -6932,10 +7092,9 @@ function wrapper(plugin_info) {
       this.filterPolygon);
 
 
-    var fanpointGuids = Object.keys(this.fanpoints);
-    var npoints = fanpointGuids.length;
+    var rawFanpointGuids = Object.keys(this.fanpoints);
 
-    if (npoints === 0) {
+    if (rawFanpointGuids.length === 0) {
       // No plan -> reset signature and disable the path
       thisplugin.lastPlanSignature = null;
       if (thisplugin.showOrderPath) {
@@ -6944,12 +7103,17 @@ function wrapper(plugin_info) {
       return;
     }
 
-    // signature of the current portal set (GUID set, order-independent)
-    var currentSignature = fanpointGuids.sort()
+    // signature of the RAW candidate portal set (GUID set, order-independent, before the "No
+    // entry" shortcut's manual exclusions below are applied) — this is what detects an actual
+    // change to the drawn selection (new/edited polygon, Bookmarks-only, …); toggling an
+    // exclusion must never count as one itself, or applying it here would immediately look
+    // like a "new" portal set and get dropped again by the block right below.
+    var currentSignature = rawFanpointGuids.sort()
       .join(',');
 
-    // If the portal set changed: disable the path and drop manual link flips (ghi#23),
-    // since they reference GUID pairs that may no longer be part of the plan.
+    // If the portal set changed: disable the path, drop manual link flips (ghi#23) and any
+    // manual portal exclusions (the "No entry" shortcut) — all reference GUIDs that may no
+    // longer be part of the plan.
     if (thisplugin.lastPlanSignature !== null &&
       thisplugin.lastPlanSignature !== currentSignature) {
 
@@ -6958,6 +7122,7 @@ function wrapper(plugin_info) {
       thisplugin.relocatedForLessWalkingGuids = {};
       thisplugin.displayOrderGuids = null;
       thisplugin.requestLinkOrderRecompute();
+      thisplugin.clearExcludedPortals();
 
       if (thisplugin.showOrderPath) {
         thisplugin.setOrderPathActive(false);
@@ -6976,6 +7141,21 @@ function wrapper(plugin_info) {
 
     // Store signature for the next run
     thisplugin.lastPlanSignature = currentSignature;
+
+    // Apply manual portal exclusions (the "No entry" shortcut) now that the signature above is
+    // settled, so they never themselves look like a changed selection.
+    Object.keys(thisplugin.excludedPortalGuids).forEach(function (guid) {
+      delete thisplugin.fanpoints[guid];
+    });
+
+    if (Object.keys(thisplugin.fanpoints).length === 0) {
+      // Every candidate portal of the selection is excluded: nothing left to plan.
+      thisplugin.linksLayerGroup.clearLayers();
+      thisplugin.fieldsLayerGroup.clearLayers();
+      thisplugin.numbersLayerGroup.clearLayers();
+      thisplugin.clearAllPortalLabels();
+      return;
+    }
 
     // Find convex hull from fanpoints list of points
     // Returns array : [guid, [x,y],.....]
@@ -7076,7 +7256,7 @@ function wrapper(plugin_info) {
       }
     }
 
-    // Pinned anchor (thisplugin.setAnchorByGuid — Pick anchor button, or the auto-orientation
+    // Pinned anchor (thisplugin.setAnchorByGuid — Pick anchor menu entry, or the auto-orientation
     // search below picking an off-hull portal): pin thisplugin.startingpointIndex to it every
     // run, since buildFanPlan() only ever reads the anchor via thisplugin.perimeterpoints[...].
     // Cleared if the portal dropped out of the plan (polygon edited, Bookmarks-only toggled, …).
@@ -7748,6 +7928,7 @@ function wrapper(plugin_info) {
     $.each(window.portals, function (guid, portal) {
       thisplugin.locations[guid] = map.project(portal.getLatLng(), thisplugin.PROJECT_ZOOM);
     });
+    thisplugin.refreshExcludedPortalMarkers();
 
     thisplugin.intelLinks = {};
     $.each(window.links, function (guid, link) {
@@ -7821,10 +8002,10 @@ function wrapper(plugin_info) {
   var symbol_clockwise = '&#8635;';
   var symbol_counterclockwise = '&#8634;';
   var symbol_clipboard = '&#128203;';
-  var symbol_target = '&#127919;';
   var symbol_menu = '&#9776;';
   var symbol_left = '&#5130;';
   var symbol_right = '&#5125;';
+  var symbol_noEntry = '&#9940;';
   // A key with a small camera in its lower right corner (Keys video).
   var symbol_keysVideo = '<span class="plugin_fanfields3_keysvideo_icon">&#128273;<span>&#128247;</span></span>';
 
@@ -7849,6 +8030,15 @@ function wrapper(plugin_info) {
         // hard-stop double click
         L.DomEvent.on(container, 'dblclick', L.DomEvent.stop);
 
+
+        $(container)
+          .append(
+            '<a id="fanfieldMenuButton" href="javascript: void(0);" class="fanfields-control" title="Fan Fields 3 - Menu">' +
+            symbol_menu + '</a>'
+          )
+          .on("click", "#fanfieldMenuButton", function () {
+            thisplugin.showMainMenu(this);
+          });
 
         $(container)
           .append(
@@ -7879,11 +8069,11 @@ function wrapper(plugin_info) {
 
         $(container)
           .append(
-            '<a id="fanfieldPickAnchorButton" href="javascript: void(0);" class="fanfields-control" title="Pick anchor: click a portal on the map to make it the anchor, even one inside the hull">' +
-            symbol_target + '</a>'
+            '<a id="fanfieldExcludePortalButton" href="javascript: void(0);" class="fanfields-control" title="Exclude portals: click, then click plan portals to leave them out of the plan">' +
+            symbol_noEntry + '</a>'
           )
-          .on("click", "#fanfieldPickAnchorButton", function () {
-            thisplugin.toggleAnchorPicking();
+          .on("click", "#fanfieldExcludePortalButton", function () {
+            thisplugin.togglePortalExclusionMode();
           });
 
         $(container)
@@ -7904,15 +8094,6 @@ function wrapper(plugin_info) {
             thisplugin.lock();
           });
 
-        $(container)
-          .append(
-            '<a id="fanfieldMenuButton" href="javascript: void(0);" class="fanfields-control" title="Fan Fields 3 - Menu">' +
-            symbol_menu + '</a>'
-          )
-          .on("click", "#fanfieldMenuButton", function () {
-            thisplugin.showMainMenu(this);
-          });
-
         return container;
       },
     });
@@ -7926,6 +8107,10 @@ function wrapper(plugin_info) {
 
     var entries = [
       { label: 'Options&hellip;', action: thisplugin.showOptionsDialog },
+      {
+        label: thisplugin.isPickingAnchor ? 'Pick&nbsp;anchor&nbsp;(click&nbsp;to&nbsp;cancel)' : 'Pick&nbsp;anchor',
+        action: thisplugin.toggleAnchorPicking
+      },
       { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
       { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
       { label: 'Stats', action: thisplugin.showStatistics },
@@ -8298,6 +8483,11 @@ function wrapper(plugin_info) {
 
     thisplugin.orderPathLayerGroup = new L.LayerGroup();
 
+    // Always on the map (not a togglable Fanfields layer): markers for manually excluded
+    // portals need to stay visible even while picking is armed and the plan itself hasn't been
+    // recalculated yet (see thisplugin.toggleExcludedPortal).
+    thisplugin.excludedPortalMarkersLayerGroup = new L.LayerGroup().addTo(map);
+
 
     //Extend LatLng here to ensure it was created before
     thisplugin.initLatLng();
@@ -8402,11 +8592,21 @@ function wrapper(plugin_info) {
       }, 1);
     });
 
-    // "Pick anchor" (sidebar button): the next portal clicked/selected on the map becomes
-    // the anchor, hull or not. Disarms itself after one pick (or a failed one), same as most
-    // single-shot picking tools. A portal outside the current plan (outside the drawn
-    // polygon(s), or excluded by Bookmarks-only) can't be set — warn instead of failing silently.
+    // "No entry" shortcut: while armed, the next portal clicked/selected on the map toggles
+    // whether it's excluded from the plan — never disarms itself, so several portals can be
+    // marked in a row; see thisplugin.togglePortalExclusionMode for what happens on disarm.
+    // Takes priority over "Pick anchor" below (the two picking modes are never meant to run
+    // at once; arming one never disarms the other explicitly, but only one tool's portal click
+    // handling makes sense to apply to any given click).
     window.addHook('portalSelected', function (data) {
+      if (thisplugin.isExcludingPortals) {
+        var excludeGuid = data && data.selectedPortalGuid;
+        if (excludeGuid && (excludeGuid in thisplugin.fanpoints || thisplugin.excludedPortalGuids[excludeGuid])) {
+          thisplugin.toggleExcludedPortal(excludeGuid);
+        }
+        return;
+      }
+
       if (!thisplugin.isPickingAnchor) return;
 
       thisplugin.isPickingAnchor = false;
