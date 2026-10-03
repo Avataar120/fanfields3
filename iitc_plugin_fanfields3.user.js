@@ -838,6 +838,12 @@ function wrapper(plugin_info) {
   // not necessarily last overall: a portal the anchor never links to directly can still come
   // after it. Walk/display order only; sortedFanpoints (build order) is untouched, and an active
   // Route order already models this via its own precedences.
+  //
+  // None of the portals ahead of the anchor need a particular order relative to each other —
+  // each only needs to be captured and keyed sometime before the anchor is reached — so that
+  // segment is reordered (never the segment after the anchor, which this doesn't touch) to walk
+  // as little as possible, starting from the player's own position and ending at the anchor. See
+  // thisplugin.outboundPlayerPosition below for where that position comes from.
   thisplugin.moveAnchorAfterItsTargetsIfOutbound = function (order) {
     if (thisplugin.stardirection !== thisplugin.starDirENUM.RADIATING) return order;
     if (!order || order.length <= 1) return order;
@@ -854,7 +860,129 @@ function wrapper(plugin_info) {
     rest.forEach(function (fp, idx) { if (targetGuids[fp.guid]) lastTargetIdx = idx; });
     if (lastTargetIdx === -1) return order; // targets not found in this order — leave as is
 
-    return rest.slice(0, lastTargetIdx + 1).concat([anchor]).concat(rest.slice(lastTargetIdx + 1));
+    var before = rest.slice(0, lastTargetIdx + 1);
+    var after = rest.slice(lastTargetIdx + 1);
+
+    thisplugin.ensureOutboundPositionTracking();
+    if (thisplugin.outboundPlayerPosition) {
+      before = thisplugin.orderPrefixForOutbound(before, anchor, thisplugin.outboundPlayerPosition.latlng);
+    }
+    // No cached position yet: ensureOutboundPositionTracking() above has a fetch under way and
+    // redraws once it resolves — leave this segment in its natural order meanwhile.
+
+    return before.concat([anchor]).concat(after);
+  };
+
+  // RADIATING (OUTBOUND) mode: the player's position, cached for ordering the walk ahead of the
+  // anchor above. Never fetched synchronously from there (geolocation is async) — refreshed
+  // periodically here instead while RADIATING is active, and used stale between refreshes rather
+  // than blocking the draw. { latlng, source }, same shape thisplugin.getPlayerPosition returns.
+  thisplugin.outboundPlayerPosition = null;
+  thisplugin.OUTBOUND_POSITION_REFRESH_MS = 60000;
+  thisplugin._outboundPositionTimer = null;
+  thisplugin._outboundPositionFetchInFlight = false;
+
+  thisplugin.refreshOutboundPlayerPosition = function () {
+    if (thisplugin._outboundPositionFetchInFlight) return;
+    thisplugin._outboundPositionFetchInFlight = true;
+    thisplugin.getPlayerPosition(function (position) {
+      thisplugin._outboundPositionFetchInFlight = false;
+      thisplugin.outboundPlayerPosition = position;
+      if (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) {
+        thisplugin.redrawWalkOrder();
+      }
+    });
+  };
+
+  // Starts (or keeps alive) the periodic refresh above while RADIATING is active, and stops it
+  // the moment it isn't — this must never poll GPS for an inbound plan. Called from
+  // moveAnchorAfterItsTargetsIfOutbound (so it starts as soon as a RADIATING plan is first drawn)
+  // and from toggleStarDirection (so switching away stops it right away, not on the next draw).
+  thisplugin.ensureOutboundPositionTracking = function () {
+    if (thisplugin.stardirection !== thisplugin.starDirENUM.RADIATING) {
+      clearInterval(thisplugin._outboundPositionTimer);
+      thisplugin._outboundPositionTimer = null;
+      return;
+    }
+    if (thisplugin._outboundPositionTimer) return;
+    thisplugin.refreshOutboundPlayerPosition();
+    thisplugin._outboundPositionTimer = setInterval(thisplugin.refreshOutboundPlayerPosition, thisplugin.OUTBOUND_POSITION_REFRESH_MS);
+  };
+
+  // Orders prefixFps (the portals ahead of the anchor in RADIATING mode) to walk as little as
+  // possible from startLatLng (the player) through all of them and on to anchorFp — nothing here
+  // needs any particular order relative to anything else, so only total distance matters.
+  // Nearest-neighbour construction, then a bounded local-search pass (same moves as
+  // computeRouteOrder's: move a short run elsewhere, or reverse a stretch) capped by a pass
+  // count rather than a time budget, since this runs synchronously on every redraw, not from a
+  // one-off button click.
+  thisplugin.orderPrefixForOutbound = function (prefixFps, anchorFp, startLatLng) {
+    var m = prefixFps.length;
+    if (m <= 1) return prefixFps;
+
+    var latLngs = prefixFps.map(function (fp) { return map.unproject(fp.point, thisplugin.PROJECT_ZOOM); });
+    var anchorLatLng = map.unproject(anchorFp.point, thisplugin.PROJECT_ZOOM);
+    var allPoints = latLngs.concat([startLatLng, anchorLatLng]);
+    var START = m, END = m + 1;
+    var dist = allPoints.map(function (a) { return allPoints.map(function (b) { return a.distanceTo(b); }); });
+
+    function lengthOf(seq) {
+      var total = dist[START][seq[0]];
+      for (var i = 1; i < seq.length; i++) total += dist[seq[i - 1]][seq[i]];
+      total += dist[seq[seq.length - 1]][END];
+      return total;
+    }
+
+    // Nearest-neighbour from the player's position.
+    var seq = [];
+    var placed = [];
+    var current = START;
+    while (seq.length < m) {
+      var choice = -1;
+      for (var i = 0; i < m; i++) {
+        if (placed[i]) continue;
+        if (choice === -1 || dist[current][i] < dist[current][choice]) choice = i;
+      }
+      seq.push(choice);
+      placed[choice] = true;
+      current = choice;
+    }
+
+    var bestLength = lengthOf(seq);
+    var maxPasses = 6;
+    for (var pass = 0; pass < maxPasses; pass++) {
+      var improved = false;
+      for (var len = 1; len <= 3 && !improved; len++) {
+        for (var a = 0; a + len <= m && !improved; a++) {
+          var run = seq.slice(a, a + len);
+          var rest = seq.slice(0, a).concat(seq.slice(a + len));
+          for (var j = 0; j <= rest.length && !improved; j++) {
+            if (j === a) continue;
+            var candidate = rest.slice(0, j).concat(run, rest.slice(j));
+            var candLength = lengthOf(candidate);
+            if (candLength < bestLength - 1e-6) {
+              seq = candidate;
+              bestLength = candLength;
+              improved = true;
+            }
+          }
+        }
+      }
+      for (var x = 0; x < m - 1 && !improved; x++) {
+        for (var y = x + 1; y < m && !improved; y++) {
+          var reversed = seq.slice(0, x).concat(seq.slice(x, y + 1).reverse(), seq.slice(y + 1));
+          var revLength = lengthOf(reversed);
+          if (revLength < bestLength - 1e-6) {
+            seq = reversed;
+            bestLength = revLength;
+            improved = true;
+          }
+        }
+      }
+      if (!improved) break;
+    }
+
+    return seq.map(function (idx) { return prefixFps[idx]; });
   };
 
   // Identifies the plan's shape: its portals in build order, each with the portals it throws to.
@@ -3697,6 +3825,7 @@ function wrapper(plugin_info) {
 
   thisplugin.toggleStarDirection = function () {
     thisplugin.stardirection *= -1;
+    thisplugin.ensureOutboundPositionTracking(); // stops GPS polling right away when leaving RADIATING
     thisplugin.delayedUpdateLayer(0.2, true);
   };
 
@@ -5747,9 +5876,12 @@ function wrapper(plugin_info) {
 
   // "Less walking": a portal whose own OUTGOING count is exactly 2 (its anchor link plus one
   // mesh link) is a candidate. Its mesh link flips to point AT it (mesh partner -> portal)
-  // when that partner is just as close, or closer, to whatever comes right after this portal
-  // in the walk — i.e. this portal wasn't really "on the way", so the partner can throw
-  // straight to the next stop instead. A portal with outgoing count 1 or 3+ is left untouched.
+  // when visiting it between its own walk neighbors (whichever portals come right before and
+  // right after it in the walk) costs more than skipping straight from one to the other — i.e.
+  // this portal wasn't really "on the way". A portal with outgoing count 1 or 3+ is left
+  // untouched. The mesh partner's own position plays no part in this test: whether it happens
+  // to be the walk's previous stop, a later one, or nowhere nearby, "on the way" is decided
+  // purely by the portal's own neighbors, via plain triangle inequality.
   //
   // Once flipped, the portal is relocated in the WALK/DISPLAY order only
   // (thisplugin.displayOrderGuids — see computeDistanceOrderReordering), never in
@@ -5786,18 +5918,35 @@ function wrapper(plugin_info) {
     var meshFlippedGuids = {};
 
     // Mesh links: only the current thrower can qualify (its own 2 outgoing links are the fan
-    // link plus exactly this one mesh link) — flip it to point at the thrower only if the
-    // distance test says it isn't really on the way to the next stop.
+    // link plus exactly this one mesh link) — flip it to point at the thrower only if visiting
+    // it between its own walk neighbors isn't worth it (see above).
     current.forEach(function (e) {
       if (e.isFanLink) return;
       if (outgoingCountByGuid[e.srcGuid] !== 2) return;
 
+      // e.srcGuid is never the anchor (a link touching it is always isFanLink, filtered above),
+      // so it's never the walk's very first portal and prevFp always exists; nextFp doesn't,
+      // for whichever portal ends up last in the walk.
+      var prevFp = sorted[indexByGuid[e.srcGuid] - 1];
       var nextFp = sorted[indexByGuid[e.srcGuid] + 1];
-      if (!nextFp) return; // last portal in the walk, nothing to compare against
 
-      var d1 = dist(e.dstGuid, e.srcGuid);
-      var d2 = dist(e.dstGuid, nextFp.guid);
-      if (!(d2 < d1)) return; // this portal is genuinely on the way, leave it throwing
+      var shouldFlip;
+      if (nextFp) {
+        // Triangle inequality on the portal's own neighbors: visiting it (prevFp -> src ->
+        // nextFp) only "costs" something over skipping it (prevFp -> nextFp direct) when it's
+        // really a detour. A margin avoids flipping over floating-point noise on three
+        // near-collinear portals, where there's nothing to gain either way.
+        var viaSrc = dist(prevFp.guid, e.srcGuid) + dist(e.srcGuid, nextFp.guid);
+        var direct = dist(prevFp.guid, nextFp.guid);
+        shouldFlip = viaSrc > direct + 1e-6;
+      } else {
+        // Last portal in the walk: there's no "next" to route around, so it's never really "on
+        // the way" to anything — let it through to the feasibility check below, same as any
+        // other candidate. Worst case, the reordering step's cheapest insertion puts it right
+        // back at the end, same as leaving it unflipped would have.
+        shouldFlip = true;
+      }
+      if (!shouldFlip) return;
 
       var desiredSrc = e.dstGuid;
       var desiredDst = e.srcGuid;
