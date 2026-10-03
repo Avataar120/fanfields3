@@ -3,8 +3,8 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         5.2.0.20261003
-// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor on the map, a Task List that follows your progress and can Reroute the steps left from where you stand, key counts read from a screen recording of your keys in Ingress (Keys plugin), and route export to Google Maps / Portal Route. Enable from the layer chooser.
+// @version         6.0.0.20261004
+// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links, and route export to Google Maps / Portal Route. Enable from the layer chooser.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
 // @icon            https://raw.githubusercontent.com/Avataar120/fanfields3/master/fanfields3-32.png
@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-03-114147';
+  plugin_info.dateTimeVersion = '2026-10-04-000915';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -33,6 +33,23 @@ function wrapper(plugin_info) {
 
   var arcname = (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'Arc' : '***';
   var changelog = [{
+      version: '6.0.0',
+      changes: [
+        'NEW: Added an "Exclude portals" shortcut on the map (no-entry icon): click it, then click plan portals to leave them out of the plan (or bring them back in), and click it again when done. Excluded portals show a no-entry sign and are remembered when an op is saved, so they come back when that op is reloaded. The hamburger menu moved to the top of the map buttons, and "Pick anchor" is now an entry in that menu instead of its own icon.',
+        'NEW: In outbound mode, if a link planned to come INTO the anchor ends up thrown OUT of it instead (the only way possible once you\'re standing at the anchor), the plan now automatically swaps another not-yet-thrown outbound link to inbound to compensate, keeping the total outbound links matched to your SBUL count — kept up to date even while the plan is Locked.',
+        'NEW: In outbound mode, the anchor now shows up in the Task List right after the last portal it links to, instead of first, since throwing those links needs keys you only get by visiting those portals first. The walk leading up to the anchor is also ordered to minimize your walking from your current position (GPS, else IITC\'s own location, else the map center).',
+        'NEW: "Less walking" now also keeps as many double fields (jet links) intact when choosing the walk order ahead of the anchor in outbound mode, not just the shortest walk, so shifting the anchor no longer risks losing fields the plan could otherwise form.',
+        'NEW: Throwing a link now automatically spends one key for its destination portal from the Keys plugin (toggle in Options: "Spend keys on throw").',
+        'NEW: Walk sim now also draws each portal\'s own links and completed fields (thin cyan) as the simulation reaches them, with a small running counter of links, fields and distance walked so far; the drawing stays on the map once the simulation finishes, until you tap the screen.',
+        'NEW: The Statistics window now also shows the plan\'s total walking distance.',
+        'IMPROVE: Destroying a portal that was a Destroy stop now clears its red cross on the map right away, even while the plan is Locked, and its Task List row turns pale yellow and struck through like any other finished portal instead of just disappearing.',
+        'IMPROVE: Target portal names in the Task List\'s link details are now clickable like every other portal name: flies to and selects that portal on the map, and links to Google Maps when printed.',
+        'IMPROVE: Shifting the anchor and other plan changes are noticeably faster now, since the walk order no longer gets recalculated several times over for the same redraw.',
+        'IMPROVE: Plan links are now drawn purple instead of red, so they stand out better from Blockers and other red markers.',
+        'FIX: "Less walking" now correctly spots a portal that isn\'t really on the way and reroutes around it, including the very last portal of the walk, which it used to skip entirely — some clear shortcuts were being missed because it compared the wrong distances.',
+        'FIX: The Fields column in the Task List could grow so wide, next to a portal with many fields, that other portals\' smaller field counts ended up centered outside the visible area, making them look empty.',
+      ],
+    },{
       version: '5.2.0',
       changes: [
         'NEW: A saved op now also remembers the plugin options and the anchor it was saved with, and reloading it restores all three together — not just the drawing.',
@@ -1327,22 +1344,32 @@ function wrapper(plugin_info) {
         'Using Drawtools, draw one or more polygons around the portals you want to work with. ' +
         'Polygons can overlap each other or be completely separated. All portals within the polygons ' +
         'count toward your planned fanfield. ' +
-        'Optional: in the menu\'s <i>Options</i>, set <i>Portal&nbsp;selection</i> to <i>Bookmarks&nbsp;only</i> to restrict the selection to your bookmarked portals.</p>' +
+        'Optional: in the menu\'s <i>Options</i>, set <i>Portal&nbsp;selection</i> to <i>Bookmarks&nbsp;only</i> to restrict the selection to your bookmarked portals. ' +
+        'To fine-tune the selection without redrawing the polygon, use the map\'s &#9940; (no-entry) shortcut: click it, then click plan portals to leave them out of the plan (or bring them back in), and click it again when done.</p>' +
 
         '<p><b>Show the plan</b><br>' +
         'From the layer selector, enable the Fanfields layers (Links / Fields / Numbers). ' +
-        'The fanfield is calculated and shown as red links/fields on the intel, with link directions indicated by dashed stubs at the origin portal.</p>' +
+        'The fanfield is calculated and shown as purple links and red fields on the intel, with link directions indicated by dashed stubs at the origin portal.</p>' +
 
         '<p><b>Choose the anchor (start portal)</b><br>' +
-        'By default, the script selects an anchor portal from the convex hull of all selected portals. ' +
-        'Use the Cycle&nbsp;Start buttons to step through hull portals (previous/next). ' +
-        'To force an inside portal as anchor (totally legitimate), place a Drawtools marker snapped onto that portal, ' +
-        'then cycle until it becomes the anchor.</p>' +
+        'By default, the script searches in the background for a start portal and direction that reuse as many of your faction\'s own existing links between the selected portals as possible, so the plan lines up with real progress; this runs once right after drawing or editing a polygon. ' +
+        'With no such link to reuse, it falls back to a portal on the convex hull of the selection. ' +
+        'Use the Cycle&nbsp;Start buttons (&#8634;/&#8635;) to step through hull portals yourself, or <i>Pick&nbsp;anchor</i> (menu) to click any portal of the plan directly on the map, hull or not. ' +
+        'To force an inside portal the old way, place a Drawtools marker snapped onto it, then cycle until it becomes the anchor. ' +
+        'Picking an anchor yourself this way (or cycling) cancels the automatic search for that polygon.</p>' +
 
         '<p><b>Build mode: inbounding / outbounding</b><br>' +
         'A fanfield can be done <i>inbounding</i> by farming many keys at the anchor and linking <i>to</i> it from all other portals. ' +
         'It can also be done <i>outbounding</i> by star-linking <i>from</i> the anchor until the maximum number of outgoing links is reached. ' +
-        'In outbounding mode you can set how many SBUL you plan to use (0–4) to calculate the outgoing link capacity.</p>' +
+        'In outbounding mode you can set how many SBUL you plan to use (0–4) to calculate the outgoing link capacity. ' +
+        'The Task List then places the anchor right after the last portal it directly links to — not first — since throwing those links needs keys you only get by visiting those portals first; the steps leading up to it are ordered to minimize your walking from your current position (GPS, else IITC\'s own location, else the map center). ' +
+        'If a link planned to come into the anchor ends up thrown out of it instead (the only way possible once you\'re standing there), the plan automatically swaps another not-yet-thrown outbound link to inbound to compensate, so the total outbound links stays matched to your SBUL count — even while the plan is Locked.</p>' +
+
+        '<p><b>Order & walking optimization</b><br>' +
+        'In Options, switch between <i>Clockwise</i> and <i>Counterclockwise</i> direction to find an easier route or squeeze out extra fields. ' +
+        'The walk order is automatically optimized to reduce backtracking ("Less walking"): a portal that isn\'t really on the way gets relocated earlier in the walk (shown green in the Task List, as a reminder to capture it and gather its keys ahead of schedule) rather than forcing its own link into a detour. ' +
+        'Flip any single link\'s direction with the &#8646; button next to it in the Task List (keys needed update accordingly); use <i>Reset&nbsp;link&nbsp;orders</i> there to revert every manual flip and the walking optimization back to the algorithm\'s own choice. ' +
+        'For full control over the visit order itself, open <i>Manage&nbsp;order</i> (menu) and drag &amp; drop portals (or use the &#9650;/&#9660; buttons on mobile); use <i>Path</i> there to preview a straight-line route along the current sequence.</p>' +
 
         '<p><b>Avoid blockers</b><br>' +
         'If you need to plan around links you cannot or do not want to destroy, use <i>Respect&nbsp;Intel</i> (menu &rarr; Options). ' +
@@ -1354,12 +1381,8 @@ function wrapper(plugin_info) {
         'With <i>Blockers</i> on (Options, the default), blockers are drawn as red dotted lines and the Task List gets <i>Destroy</i> rows: portals to neutralize so that the blockers are gone before the link they block is thrown. ' +
         'An enemy portal the plan captures anyway is marked with a cross when its capture frees a link in time. ' +
         '<i>Max&nbsp;detour</i> (Options: 100&nbsp;m, 200&nbsp;m, 500&nbsp;m, 1&nbsp;km or no limit) caps the extra walk of a single Destroy stop; blockers that cannot be freed within it are listed under the Task List. ' +
+        'Destroying a Destroy stop\'s portal clears its cross and finishes that row (pale yellow, struck through) right away, even while the plan is Locked. ' +
         'Turning <i>Blockers</i> off only removes these rows. A link of your own faction can only be broken with a Jarvis/ADA flip, or by changing <i>Respect&nbsp;Intel</i>.</p>' +
-
-        '<p><b>Order & route planning</b><br>' +
-        'In Options, switch between <i>Clockwise</i> and <i>Counterclockwise</i> direction to find an easier route or squeeze out extra fields. ' +
-        'For fine control, open <i>Manage Portal Order</i> (menu) and drag &amp; drop portals to customise your visit order. ' +
-        'Use <i>Path</i> to preview a straight-line route along the current portal sequence.</p>' +
 
         '<p><b>Freeze recalculation</b><br>' +
         'The plan locks itself as soon as a new plan is completely calculated (once IITC has finished loading the map, and including the automatic anchor search), so it no longer moves while you pan, zoom or the map data refreshes. ' +
@@ -1368,13 +1391,19 @@ function wrapper(plugin_info) {
         'The Task List keeps reflecting portal captures and links thrown in-game while locked — only the plan itself (link/field order) stays frozen. ' +
         'Switch back to <i>🔓&nbsp;Unlocked</i> to let the plan itself refresh again.</p>' +
 
+        '<p><b>Manage ops</b><br>' +
+        'Open <i>Manage&nbsp;ops</i> (menu) to save your current drawing — together with its options and anchor — under a name, and reload, rename, update or delete it later. ' +
+        'Loading an op replaces everything currently drawn and moves the map to it; you\'ll be warned first if that would discard unsaved changes. ' +
+        'A <i>Clear&nbsp;drawing</i> button there wipes the current drawing.</p>' +
+
         '<p><b>Task list & exports</b><br>' +
         'Open <i>Task List</i> to get a step-by-step plan including per-portal key requirements, outgoing link counts, and (optional) link details. ' +
-        'If you use a Keys/LiveInventory plugin, the task list can also show your available key counts. ' +
+        'If you use a Keys/LiveInventory plugin, the task list can also show your available key counts, and keys are spent automatically from the Keys plugin as you throw links (toggle in Options: <i>Spend&nbsp;keys&nbsp;on&nbsp;throw</i>). ' +
         'With the Keys plugin, its <i>Keys video</i> button fills in your key counts from a screen recording of your keys in Ingress. ' +
         'The task list includes a navigation link for Google Maps and a print-friendly view. ' +
         'Its <i>Reroute</i> button reorders the steps still to do, starting from your current position (GPS, else IITC\'s own location, else the map center), so you walk as little as possible — while still capturing each portal, and getting its keys, before anyone links to it, and without losing a field. ' +
-        'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>).</p>' +
+        'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>). ' +
+        'Its <i>Walk&nbsp;sim</i> button closes the list and previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached (toggle in Options: <i>Walk&nbsp;sim&nbsp;links</i>); tap the map to dismiss it.</p>' +
 
         '<hr noshade>' +
 
