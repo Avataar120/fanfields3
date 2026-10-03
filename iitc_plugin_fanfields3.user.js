@@ -1542,6 +1542,32 @@ function wrapper(plugin_info) {
     return text;
   };
 
+  // Task List: the row for a Destroy stop from an earlier run that no longer has any blocker
+  // left to free (thisplugin.doneBlockerStopGuids/plan.doneStops) — shown pale yellow and
+  // struck through, like any other finished portal, instead of silently disappearing the
+  // instant the blocking link it stood for is gone. No checkbox, no "frees" count and no
+  // Google Maps stop: there's nothing left to do here.
+  thisplugin.buildDoneBlockerStopHTML = function (stop) {
+    var latlng = map.unproject(stop.point, thisplugin.PROJECT_ZOOM);
+    var lat = Math.round(latlng.lat * 10000000) / 10000000;
+    var lng = Math.round(latlng.lng * 10000000) / 10000000;
+    var title = window.escapeHtmlSpecialChars(thisplugin.getPortalTitleByGuid(stop.guid));
+    var guid = stop.guid || '';
+
+    var text = '<tbody class="plugin_fanfields3_exportText_Portal"><tr class="plugin_fanfields3_portal_done" ' +
+      'title="This Destroy stop is no longer needed: the blocking link(s) it was meant to free are already gone.">';
+    text += '<td>&#10006;</td>';
+    text += '<td>Nothing</td>';
+    text += '<td></td>';
+    text += '<td>';
+    text += '  <a class="plugin_fanfields3_exportText_print" href="https://www.google.com/maps/dir/?api=1&destination=' + lat + ',' + lng + '" target="_blank">' + title + '</a>';
+    text += '  <a class="plugin_fanfields3_exportText_ui" onclick="window.plugin.fanfields.flyToPortal({lat: ' + lat + ', lng: ' + lng + "}, '" + guid + "'); return false;" + '">' + title + '</a>';
+    text += '</td>';
+    text += '<td></td><td></td><td></td>';
+    text += '</tr></tbody>\n';
+    return text;
+  };
+
   // Keys still needed at a plan portal: one per incoming link, except those already made in-game
   // (when "Grey out done links" is on) — that key was already spent to make the link.
   thisplugin.getKeysStillNeeded = function (portal) {
@@ -1670,6 +1696,9 @@ function wrapper(plugin_info) {
     displayOrder.forEach(function (portal, index) {
       blockerPlan.stops.forEach(function (stop) {
         if (stop.slot === index) text += thisplugin.buildBlockerStopHTML(stop, gmStops);
+      });
+      blockerPlan.doneStops.forEach(function (stop) {
+        if (stop.slot === index) text += thisplugin.buildDoneBlockerStopHTML(stop);
       });
 
       var p, lat, lng;
@@ -3853,14 +3882,36 @@ function wrapper(plugin_info) {
   // beats several stops on the same walking), then stops that became redundant are dropped.
   // The walk itself is never reordered.
   //
-  // Returns { blockers, stops, onRoute, unresolved, extraDistance }:
+  // Returns { blockers, stops, doneStops, onRoute, unresolved, extraDistance }:
   //  - blockers: every blocking link { a, b, team, guidA, guidB, deadline, blocked }
   //  - stops: extra Destroy rows in walk order { guid, point, slot, detour,
   //    blockers } — slot = index of the walk portal it goes right before
+  //  - doneStops: Destroy stops of an earlier run whose portal has no blocker left to free at
+  //    all any more (see thisplugin.doneBlockerStopGuids) — { guid, point, slot }
   //  - onRoute: plan portal guid -> blockers freed by the capture the plan already does there
   //  - unresolved: blockers no stop could free within the maximum detour
+  //
+  // A Destroy stop's own portal and the blocker(s) it frees are both recomputed from scratch
+  // every call, straight from the current intel links — nothing about a stop is remembered
+  // from one call to the next, which is what lets a blocker that just got destroyed in-game
+  // (most often: a stop's own portal was destroyed, destroying its links with it) drop out of
+  // `blockers`/`stops` right away. See thisplugin.doneBlockerStopGuids for how `doneStops`
+  // keeps such a resolved stop showing in the Task List (as finished, not gone) regardless.
+  thisplugin.doneBlockerStopGuids = {}; // guid -> { point, slot } of a Destroy stop fully resolved
+  thisplugin.blockerCandidateGuids = {}; // guid -> { point, slot } of the latest run where it was an active stop
+  thisplugin.blockerTrackingPlanKey = null;
+
+  thisplugin.syncBlockerTracking = function () {
+    var key = thisplugin.getPlanShapeKey();
+    if (key !== thisplugin.blockerTrackingPlanKey) {
+      thisplugin.doneBlockerStopGuids = {};
+      thisplugin.blockerCandidateGuids = {};
+      thisplugin.blockerTrackingPlanKey = key;
+    }
+  };
+
   thisplugin.computeBlockerPlan = function () {
-    var plan = { blockers: [], stops: [], onRoute: {}, unresolved: [], extraDistance: 0 };
+    var plan = { blockers: [], stops: [], doneStops: [], onRoute: {}, unresolved: [], extraDistance: 0 };
     if (!thisplugin.manageBlockers) return plan;
 
     var walk = thisplugin.getDisplayOrder();
@@ -3922,7 +3973,10 @@ function wrapper(plugin_info) {
       });
     }
     plan.blockers = blockers;
-    if (!blockers.length) return plan;
+    // No early return when this is empty: the rest of this function already degrades
+    // correctly with zero blockers (every loop below simply does nothing), and falling
+    // through is what lets the "done stops" tracking further down see that NO candidate is
+    // outstanding any more, rather than skipping that bookkeeping entirely.
 
     // Candidate portals: both ends of every blocker.
     var walkIdxByKey = {};
@@ -4082,6 +4136,41 @@ function wrapper(plugin_info) {
       return total;
     }
     plan.extraDistance = routeLength(route) - routeLength(route.filter(function (item) { return item.orig !== undefined; }));
+
+    // "Done" Destroy stops: a stop's portal that no longer appears among `cands` at all has no
+    // blocker left to free by it, typically because destroying it in-game also destroyed the
+    // blocking link(s) it stood for — remember it as resolved (thisplugin.doneBlockerStopGuids)
+    // so the Task List keeps showing it, pale yellow and struck through like any other finished
+    // portal, instead of it just vanishing the instant that happens. A guid still present among
+    // `cands` still has SOME blocker to free — it just wasn't picked this round (made redundant
+    // by a cheaper stop, or by a plan capture) — so it's left alone instead: never truly
+    // resolved, nothing shown for it, exactly as before this tracking existed.
+    thisplugin.syncBlockerTracking();
+    var candGuids = {};
+    for (var candKey in cands) {
+      if (cands[candKey].guid) candGuids[cands[candKey].guid] = true;
+    }
+    var activeStopGuids = {};
+    plan.stops.forEach(function (stop) {
+      if (!stop.guid) return;
+      activeStopGuids[stop.guid] = true;
+      thisplugin.blockerCandidateGuids[stop.guid] = { point: stop.point, slot: stop.slot };
+      delete thisplugin.doneBlockerStopGuids[stop.guid]; // active again: no longer "done"
+    });
+    for (var knownGuid in thisplugin.blockerCandidateGuids) {
+      if (activeStopGuids[knownGuid]) continue;
+      if (candGuids[knownGuid]) {
+        delete thisplugin.doneBlockerStopGuids[knownGuid]; // a new blocker needs it again, after all
+        continue;
+      }
+      if (!thisplugin.doneBlockerStopGuids[knownGuid]) {
+        thisplugin.doneBlockerStopGuids[knownGuid] = thisplugin.blockerCandidateGuids[knownGuid];
+      }
+    }
+    plan.doneStops = Object.keys(thisplugin.doneBlockerStopGuids).map(function (guid) {
+      var info = thisplugin.doneBlockerStopGuids[guid];
+      return { guid: guid, point: info.point, slot: info.slot };
+    });
 
     return plan;
   };
@@ -7675,14 +7764,18 @@ function wrapper(plugin_info) {
   };
 
   // Called when IITC's own portal/link data changes (new links thrown in-game, portals
-  // captured, etc. — see the mapDataRefreshEnd/requestFinished hooks below). Unlike
-  // moveend/zoom, which just changes which area the user is looking at, this reflects an
-  // actual change to the game state, so it should still reach the Task List even while
-  // Locked — but only as the lightweight live-data refresh above, not the full plan recompute.
+  // captured or destroyed, etc. — see the mapDataRefreshEnd/requestFinished hooks below).
+  // Unlike moveend/zoom, which just changes which area the user is looking at, this reflects
+  // an actual change to the game state, so the map and Task List should still follow it even
+  // while Locked — but only by redrawing the plan already on hand (links/fields/numbers,
+  // Blockers Destroy stops and crosses included), via redrawWalkOrder(), never by recomputing
+  // it (buildFanPlan/updateLayer, which the lock exists to suppress). This is what makes a
+  // Destroy stop's cross disappear as soon as destroying that portal in-game also destroys the
+  // blocking link it stood for, without waiting for the plan to unlock.
   thisplugin.onLiveDataChanged = function (wait) {
     if (thisplugin.is_locked) {
       thisplugin.refreshLiveGameData();
-      thisplugin.refreshTaskListIfOpen();
+      thisplugin.redrawWalkOrder();
     } else {
       thisplugin.delayedUpdateLayer(wait);
     }
