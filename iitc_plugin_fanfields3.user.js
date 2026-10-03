@@ -1,4 +1,4 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @author          Avataar120 (fork of Heistergand's Fan Fields 2)
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
@@ -710,6 +710,13 @@ function wrapper(plugin_info) {
   thisplugin.manualOrderGuids = null;
   thisplugin.lastPlanSignature = null;
 
+  // Task List "Walk sim" button: see thisplugin.startWalkSim below.
+  thisplugin.walkSimLayerGroup = null;
+  thisplugin._walkSimState = null;
+  // The small "Links: N · Fields: N" counter shown while the sim runs — see
+  // thisplugin.walkSimShowLinks below (same option gates both).
+  thisplugin.walkSimCounterEl = null;
+
   // Manual per-link direction overrides (Task List "flip" button, and the "Fewer keys"
   // optimizer below).
   // Keyed by undirected link key (getUndirectedLinkKey) -> true.
@@ -807,6 +814,17 @@ function wrapper(plugin_info) {
   // preview, Google Maps navigation, Portal Route stops, bookmark order. The core algorithm
   // itself, and anything about which links/fields exist, must keep using thisplugin.sortedFanpoints.
   // A "Reroute" order (routeOrderGuids) computed on this very plan wins over both.
+  // Caches the result below (in particular the RADIATING prefix ordering, which runs a
+  // budgeted — up to OUTBOUND_PREFIX_ORDER_BUDGET_MS — local search): getDisplayOrder() is
+  // itself called many times per single redraw (Task List, map drawing, Stats, Blockers,
+  // Walk sim, ...), and without this cache each of those calls would redo that search from
+  // scratch, which is what made shift left/right (and any other anchor change) feel slow in
+  // RADIATING mode. Keyed by reference on everything the computation actually depends on:
+  // sortedFanpoints, displayOrderGuids and outboundPlayerPosition are always replaced
+  // wholesale when they change (never mutated in place — see their assignments throughout
+  // this file), so comparing references is enough to know the cached result is still valid.
+  thisplugin._displayOrderCache = null;
+
   thisplugin.getDisplayOrder = function () {
     var sorted = thisplugin.sortedFanpoints || [];
 
@@ -814,6 +832,13 @@ function wrapper(plugin_info) {
     if (routeOrder) return routeOrder;
 
     var guids = thisplugin.displayOrderGuids;
+
+    var cache = thisplugin._displayOrderCache;
+    if (cache && cache.sorted === sorted && cache.guids === guids &&
+      cache.playerPosition === thisplugin.outboundPlayerPosition) {
+      return cache.result;
+    }
+
     var order = sorted;
     if (guids && guids.length === sorted.length) {
       var byGuid = {};
@@ -828,7 +853,9 @@ function wrapper(plugin_info) {
       if (reordered && reordered[0].guid === thisplugin.startingpointGUID) order = reordered; // anchor must stay first
     }
 
-    return thisplugin.moveAnchorAfterItsTargetsIfOutbound(order);
+    var result = thisplugin.moveAnchorAfterItsTargetsIfOutbound(order);
+    thisplugin._displayOrderCache = { sorted: sorted, guids: guids, playerPosition: thisplugin.outboundPlayerPosition, result: result };
+    return result;
   };
 
   // Outbound (RADIATING) mode: throwing one of the anchor's own links needs a key to that
@@ -865,7 +892,7 @@ function wrapper(plugin_info) {
 
     thisplugin.ensureOutboundPositionTracking();
     if (thisplugin.outboundPlayerPosition) {
-      before = thisplugin.orderPrefixForOutbound(before, anchor, thisplugin.outboundPlayerPosition.latlng);
+      before = thisplugin.orderPrefixForOutbound(before, anchor, after, thisplugin.outboundPlayerPosition.latlng);
     }
     // No cached position yet: ensureOutboundPositionTracking() above has a fetch under way and
     // redraws once it resolves — leave this segment in its natural order meanwhile.
@@ -910,15 +937,47 @@ function wrapper(plugin_info) {
   };
 
   // Orders prefixFps (the portals ahead of the anchor in RADIATING mode) to walk as little as
-  // possible from startLatLng (the player) through all of them and on to anchorFp — nothing here
-  // needs any particular order relative to anything else, so only total distance matters.
-  // Nearest-neighbour construction, then a bounded local-search pass (same moves as
-  // computeRouteOrder's: move a short run elsewhere, or reverse a stretch) capped by a pass
-  // count rather than a time budget, since this runs synchronously on every redraw, not from a
-  // one-off button click.
-  thisplugin.orderPrefixForOutbound = function (prefixFps, anchorFp, startLatLng) {
+  // possible from startLatLng (the player) through all of them and on to anchorFp, while
+  // preserving as many fields as the plan can actually form. Jet-linking (one link closing two
+  // triangles at once, by reusing two links already thrown elsewhere) only pays off when its
+  // three sides are thrown in an order that lets them all actually complete — thrown too late
+  // from under a field already closed by the other two sides, a side can become impossible
+  // (the "under field" distance limit), silently losing fields that pure distance minimization
+  // would never notice. So, same as computeRouteOrder, every candidate ordering of this segment
+  // is scored against the FULL walk it would produce (prefix + anchorFp + afterFps, exactly
+  // what thisplugin.simulateWalk expects) and judged in this order:
+  //  1. precedence violations (a portal linking to another one of this very segment before that
+  //     one has been visited — same idea as computeRouteOrder's own precedences, scoped here);
+  //  2. links the walk order makes impossible to throw from under a field;
+  //  3. fields actually formed;
+  //  4. total distance walked.
+  // Nearest-neighbour construction (skipping any portal whose prerequisites within this segment
+  // aren't placed yet) for a first candidate, then a bounded local-search pass (same moves as
+  // computeRouteOrder's: move a short run elsewhere, or reverse a stretch), each judged by the
+  // same four criteria. This runs synchronously on every redraw, not from a one-off button
+  // click, so it's bounded by a short time budget rather than running to exhaustion.
+  thisplugin.OUTBOUND_PREFIX_ORDER_BUDGET_MS = 300;
+
+  thisplugin.orderPrefixForOutbound = function (prefixFps, anchorFp, afterFps, startLatLng) {
     var m = prefixFps.length;
     if (m <= 1) return prefixFps;
+
+    var indexByGuid = {};
+    prefixFps.forEach(function (fp, i) { indexByGuid[fp.guid] = i; });
+
+    // Pairs [target index, source index]: the target must be visited before the source, since
+    // the source still has to throw it a link. A link already thrown in-game is no longer a
+    // constraint; a link to anything outside this segment (the anchor included) isn't either —
+    // see the comment above.
+    var precedences = [];
+    prefixFps.forEach(function (fp, i) {
+      (fp.outgoing || []).forEach(function (target) {
+        var j = indexByGuid[target.guid];
+        if (j === undefined) return;
+        if (thisplugin.isLinkInGame(fp.guid, target.guid)) return;
+        precedences.push([j, i]);
+      });
+    });
 
     var latLngs = prefixFps.map(function (fp) { return map.unproject(fp.point, thisplugin.PROJECT_ZOOM); });
     var anchorLatLng = map.unproject(anchorFp.point, thisplugin.PROJECT_ZOOM);
@@ -932,8 +991,31 @@ function wrapper(plugin_info) {
       total += dist[seq[seq.length - 1]][END];
       return total;
     }
+    function violationsOf(seq) {
+      var pos = [];
+      seq.forEach(function (idx, p) { pos[idx] = p; });
+      return precedences.filter(function (pair) { return pos[pair[0]] > pos[pair[1]]; }).length;
+    }
+    function evaluate(seq) {
+      var fullWalk = seq.map(function (idx) { return prefixFps[idx]; }).concat([anchorFp]).concat(afterFps);
+      var sim = thisplugin.simulateWalk(fullWalk);
+      return {
+        seq: seq,
+        length: lengthOf(seq),
+        violations: violationsOf(seq),
+        invalid: Object.keys(sim.invalid).length,
+        fields: sim.triangles.length
+      };
+    }
+    function isBetter(a, b) {
+      if (a.violations !== b.violations) return a.violations < b.violations;
+      if (a.invalid !== b.invalid) return a.invalid < b.invalid;
+      if (a.fields !== b.fields) return a.fields > b.fields;
+      return a.length < b.length - 1e-6;
+    }
 
-    // Nearest-neighbour from the player's position.
+    // Nearest-neighbour from the player's position, skipping anything still blocked by a
+    // not-yet-placed prerequisite of this segment.
     var seq = [];
     var placed = [];
     var current = START;
@@ -941,40 +1023,44 @@ function wrapper(plugin_info) {
       var choice = -1;
       for (var i = 0; i < m; i++) {
         if (placed[i]) continue;
+        var blocked = precedences.some(function (pair) { return pair[1] === i && !placed[pair[0]]; });
+        if (blocked) continue;
         if (choice === -1 || dist[current][i] < dist[current][choice]) choice = i;
+      }
+      if (choice === -1) {
+        // A cycle among the precedences (shouldn't normally happen) — fall back to any
+        // unplaced portal rather than stall forever.
+        for (choice = 0; placed[choice]; choice++);
       }
       seq.push(choice);
       placed[choice] = true;
       current = choice;
     }
 
-    var bestLength = lengthOf(seq);
+    var deadline = Date.now() + thisplugin.OUTBOUND_PREFIX_ORDER_BUDGET_MS;
+    var best = evaluate(seq);
     var maxPasses = 6;
-    for (var pass = 0; pass < maxPasses; pass++) {
+    for (var pass = 0; pass < maxPasses && Date.now() < deadline; pass++) {
       var improved = false;
-      for (var len = 1; len <= 3 && !improved; len++) {
-        for (var a = 0; a + len <= m && !improved; a++) {
-          var run = seq.slice(a, a + len);
-          var rest = seq.slice(0, a).concat(seq.slice(a + len));
+      for (var len = 1; len <= 3 && !improved && Date.now() < deadline; len++) {
+        for (var a = 0; a + len <= m && !improved && Date.now() < deadline; a++) {
+          var run = best.seq.slice(a, a + len);
+          var rest = best.seq.slice(0, a).concat(best.seq.slice(a + len));
           for (var j = 0; j <= rest.length && !improved; j++) {
             if (j === a) continue;
-            var candidate = rest.slice(0, j).concat(run, rest.slice(j));
-            var candLength = lengthOf(candidate);
-            if (candLength < bestLength - 1e-6) {
-              seq = candidate;
-              bestLength = candLength;
+            var candidate = evaluate(rest.slice(0, j).concat(run, rest.slice(j)));
+            if (isBetter(candidate, best)) {
+              best = candidate;
               improved = true;
             }
           }
         }
       }
-      for (var x = 0; x < m - 1 && !improved; x++) {
+      for (var x = 0; x < m - 1 && !improved && Date.now() < deadline; x++) {
         for (var y = x + 1; y < m && !improved; y++) {
-          var reversed = seq.slice(0, x).concat(seq.slice(x, y + 1).reverse(), seq.slice(y + 1));
-          var revLength = lengthOf(reversed);
-          if (revLength < bestLength - 1e-6) {
-            seq = reversed;
-            bestLength = revLength;
+          var reversed = evaluate(best.seq.slice(0, x).concat(best.seq.slice(x, y + 1).reverse(), best.seq.slice(y + 1)));
+          if (isBetter(reversed, best)) {
+            best = reversed;
             improved = true;
           }
         }
@@ -982,7 +1068,7 @@ function wrapper(plugin_info) {
       if (!improved) break;
     }
 
-    return seq.map(function (idx) { return prefixFps[idx]; });
+    return best.seq.map(function (idx) { return prefixFps[idx]; });
   };
 
   // Identifies the plan's shape: its portals in build order, each with the portals it throws to.
@@ -1175,6 +1261,20 @@ function wrapper(plugin_info) {
 
 
 
+  // Total walking distance of the current plan: the walk order's own portal-to-portal distance
+  // (thisplugin.getDisplayOrder — relocations and any Reroute order included), plus whatever
+  // extra walking the Blockers Destroy stops add (thisplugin.computeBlockerPlan already works
+  // this out for the Task List's own summary line).
+  thisplugin.computeTotalWalkDistance = function () {
+    var order = thisplugin.getDisplayOrder();
+    var total = 0;
+    for (var i = 1; i < order.length; i++) {
+      total += thisplugin.distanceTo(order[i - 1].point, order[i].point);
+    }
+    total += thisplugin.computeBlockerPlan().extraDistance;
+    return total;
+  };
+
   // Statistics dialog: build the HTML for the current plan. Used both to open the dialog and
   // to refresh it live (see thisplugin.refreshStatisticsIfOpen) as the background plan changes.
   thisplugin.buildStatisticsHTML = function () {
@@ -1200,6 +1300,7 @@ function wrapper(plugin_info) {
       '<tr><td>Total links / keys:</td><td>' + linksText + '</td><tr>' +
       '<tr><td>Fields:</td><td>' + fieldsText + '</td><tr>' +
       '<tr><td>Build AP (links and fields):</td><td>' + (validLinks * 313 + validFields * 1250).toString() + '</td><tr>' +
+      '<tr><td>Total walk distance:</td><td>' + thisplugin.formatDistance(thisplugin.computeTotalWalkDistance()) + '</td><tr>' +
       warn +
       '</table>';
   };
@@ -2168,7 +2269,8 @@ function wrapper(plugin_info) {
       '<button type="button" id="plugin_fanfields3_tasklist_shift_right" class="plugin_fanfields3_tasklist_shift_btn" title="FanFields shift right">' +
       symbol_clockwise + '</button>' +
       '<button type="button" id="plugin_fanfields3_tasklist_refresh" class="plugin_fanfields3_tasklist_shift_btn" title="Force an IITC map data refresh">Refresh</button>' +
-      '<button type="button" id="plugin_fanfields3_tasklist_reroute" class="plugin_fanfields3_tasklist_shift_btn" title="Reorder the steps still to do, starting from your current position, to walk as little as possible">Reroute</button>';
+      '<button type="button" id="plugin_fanfields3_tasklist_reroute" class="plugin_fanfields3_tasklist_shift_btn" title="Reorder the steps still to do, starting from your current position, to walk as little as possible">Reroute</button>' +
+      '<button type="button" id="plugin_fanfields3_tasklist_walksim" class="plugin_fanfields3_tasklist_shift_btn" title="Close this list and preview the planned walk on the map, portal by portal">Walk sim</button>';
     if (window.plugin.keys) {
       buttonsHtml += '<button type="button" id="plugin_fanfields3_tasklist_keysvideo" class="plugin_fanfields3_tasklist_shift_btn" title="Update the Keys plugin from a screen recording of your keys in Ingress">Keys video</button>';
     }
@@ -2210,6 +2312,248 @@ function wrapper(plugin_info) {
       .on('click', function () {
         thisplugin.openKeysVideoDialog();
       });
+    $buttonpane.find('#plugin_fanfields3_tasklist_walksim')
+      .off('click')
+      .on('click', function () {
+        $('#plugin_fanfields3_exportText_inner').closest('.ui-dialog-content').dialog('close');
+        thisplugin.startWalkSim();
+      });
+  };
+
+  // ---------------------------------------------------------------------
+  // Task List "Walk sim" button: closes the Task List and previews the planned walk (portal
+  // positions plus any Blockers Destroy stops, in walk order — the same stops "Navigate with
+  // Google Maps" sends) as an animated line crawling from stop to stop across the map, pausing
+  // briefly at each one. Pure visualization: touches no plan state. Clicking anywhere on the
+  // map stops it early.
+  // ---------------------------------------------------------------------
+
+  thisplugin.WALK_SIM_SEGMENT_MS = 500; // time to animate between two consecutive stops
+  thisplugin.WALK_SIM_DWELL_MS = 150;   // pause at each stop before moving on
+
+  // Whether the sim also draws each portal's own outgoing links (thinner, same cyan) as the
+  // walk reaches it — lets the fields visibly form alongside the walk itself. Persisted with
+  // the other options (Options dialog); defaults on.
+  thisplugin.walkSimShowLinks = true;
+
+  // The ordered stops to animate through: every walk portal, with any Blockers Destroy stop
+  // inserted at its slot — mirrors how buildTaskListHTML/getPortalRouteStops build their own
+  // stop list, just without the HTML/API-specific parts. A portal stop also carries the
+  // latlngs of its own outgoing links, and of any field that closes exactly when this stop's
+  // links are thrown (a Destroy stop throws nothing, so it gets neither), for
+  // thisplugin.walkSimShowLinks to draw once the sim settles there. Field completion is worked
+  // out the same way thisplugin.simulateWalk does (a field closes once all 3 of its sides have
+  // been thrown, credited to whichever of the 3 links is thrown last), kept separate since this
+  // only needs latlngs to draw, not validity.
+  thisplugin.getWalkSimStops = function () {
+    var order = thisplugin.getDisplayOrder();
+    var blockerPlan = thisplugin.computeBlockerPlan();
+    var stops = [];
+
+    var pointToGuid = {};
+    order.forEach(function (fp) { pointToGuid[thisplugin.pointKey(fp.point)] = fp.guid; });
+
+    var fieldsByLink = {};
+    var seenFieldIds = {};
+    order.forEach(function (fp) {
+      (fp.outgoing || []).forEach(function (target) {
+        var meta = fp.outgoingMeta ? fp.outgoingMeta[target.guid] : null;
+        ((meta && meta.creatingFieldsWith) || []).forEach(function (thirdPoint) {
+          var thirdGuid = pointToGuid[thisplugin.pointKey(thirdPoint)];
+          if (!thirdGuid) return;
+          var id = [fp.guid, target.guid, thirdGuid].sort().join('|');
+          if (seenFieldIds[id]) return;
+          seenFieldIds[id] = true;
+          var field = {
+            id: id,
+            latlngs: [thirdPoint, fp.point, target.point].map(function (p) { return map.unproject(p, thisplugin.PROJECT_ZOOM); }),
+            links: [
+              thisplugin.getUndirectedLinkKey(fp.guid, target.guid),
+              thisplugin.getUndirectedLinkKey(fp.guid, thirdGuid),
+              thisplugin.getUndirectedLinkKey(target.guid, thirdGuid)
+            ]
+          };
+          field.links.forEach(function (linkKey) { (fieldsByLink[linkKey] = fieldsByLink[linkKey] || []).push(field); });
+        });
+      });
+    });
+
+    var builtLinks = {};
+    var formedFieldIds = {};
+
+    order.forEach(function (fp, index) {
+      blockerPlan.stops.forEach(function (stop) {
+        if (stop.slot === index) {
+          stops.push({
+            latlng: map.unproject(stop.point, thisplugin.PROJECT_ZOOM),
+            title: thisplugin.getPortalTitleByGuid(stop.guid),
+            links: [],
+            fields: []
+          });
+        }
+      });
+
+      var links = [];
+      var fields = [];
+      (fp.outgoing || []).forEach(function (target) {
+        links.push(map.unproject(target.point, thisplugin.PROJECT_ZOOM));
+        var linkKey = thisplugin.getUndirectedLinkKey(fp.guid, target.guid);
+        builtLinks[linkKey] = true;
+        (fieldsByLink[linkKey] || []).forEach(function (field) {
+          if (formedFieldIds[field.id]) return;
+          if (!field.links.every(function (k) { return builtLinks[k]; })) return;
+          formedFieldIds[field.id] = true;
+          fields.push(field.latlngs);
+        });
+      });
+
+      stops.push({
+        latlng: map.unproject(fp.point, thisplugin.PROJECT_ZOOM),
+        title: thisplugin.getPortalTitleByGuid(fp.guid),
+        links: links,
+        fields: fields
+      });
+    });
+    return stops;
+  };
+
+  // Clears the sim's drawing (trail, links, fields) and detaches the map-click handler — safe
+  // to call any time, including when nothing is currently drawn. Cancels any in-flight
+  // animation first; this is the ONLY way the drawing goes away — the sim reaching its last
+  // stop on its own leaves everything on the map (see visitNext below) so the result stays
+  // visible until the player taps the map to dismiss it.
+  thisplugin.stopWalkSim = function () {
+    var state = thisplugin._walkSimState;
+    thisplugin._walkSimState = null; // first, so any in-flight animation frame/timeout no-ops
+    if (state) {
+      if (state.rafId !== null) cancelAnimationFrame(state.rafId);
+      if (state.timeoutId !== null) clearTimeout(state.timeoutId);
+    }
+    map.off('click', thisplugin.stopWalkSim);
+
+    if (thisplugin.walkSimLayerGroup) {
+      thisplugin.walkSimLayerGroup.clearLayers();
+      if (map.hasLayer(thisplugin.walkSimLayerGroup)) map.removeLayer(thisplugin.walkSimLayerGroup);
+    }
+
+    if (thisplugin.walkSimCounterEl) {
+      thisplugin.walkSimCounterEl.remove();
+      thisplugin.walkSimCounterEl = null;
+    }
+  };
+
+  // Starts (replacing any run already in progress) an animated preview of the walk: a trail
+  // polyline grows stop by stop, with a marker at its leading edge, panning the map to keep
+  // each stop in view as it's approached.
+  thisplugin.startWalkSim = function () {
+    thisplugin.stopWalkSim();
+
+    var stops = thisplugin.getWalkSimStops();
+    if (stops.length < 2) return;
+
+    if (!thisplugin.walkSimLayerGroup) thisplugin.walkSimLayerGroup = new L.LayerGroup();
+    thisplugin.walkSimLayerGroup.addTo(map);
+
+    // Small running counter of links/fields/distance walked so far — same option as the
+    // links/fields drawing itself, updated as each stop settles (see settleHere below).
+    var totalLinksSoFar = 0;
+    var totalFieldsSoFar = 0;
+    var totalDistanceSoFar = 0;
+    if (thisplugin.walkSimShowLinks) {
+      thisplugin.walkSimCounterEl = $('<div class="plugin_fanfields3_walksim_counter"></div>')
+        .text('Links: 0 · Fields: 0 · Distance: ' + thisplugin.formatDistance(0))
+        .appendTo(document.body);
+    }
+
+    var visited = []; // real stops reached so far; visitNext(0) adds the first one
+    var trail = L.polyline(visited, {
+      color: '#00e5ff', weight: 4, opacity: 0.9, interactive: false
+    }).addTo(thisplugin.walkSimLayerGroup);
+    var head = L.circleMarker(stops[0].latlng, {
+      radius: 7, color: '#00e5ff', fillColor: '#00e5ff', fillOpacity: 1, weight: 2, interactive: false
+    }).addTo(thisplugin.walkSimLayerGroup);
+
+    var state = { rafId: null, timeoutId: null };
+    thisplugin._walkSimState = state;
+    map.on('click', thisplugin.stopWalkSim);
+
+    function centerIfOffscreen(latlng) {
+      if (!map.getBounds().contains(latlng)) map.panTo(latlng, { animate: true });
+    }
+
+    function animateSegment(fromLatLng, toLatLng, onDone) {
+      var startTs = null;
+      function step(now) {
+        if (thisplugin._walkSimState !== state) return; // stopped meanwhile
+        if (startTs === null) startTs = now;
+        var t = Math.min(1, (now - startTs) / thisplugin.WALK_SIM_SEGMENT_MS);
+        var current = L.latLng(
+          fromLatLng.lat + (toLatLng.lat - fromLatLng.lat) * t,
+          fromLatLng.lng + (toLatLng.lng - fromLatLng.lng) * t
+        );
+        head.setLatLng(current);
+        trail.setLatLngs(visited.concat([current]));
+        if (t < 1) {
+          state.rafId = requestAnimationFrame(step);
+        } else {
+          onDone();
+        }
+      }
+      state.rafId = requestAnimationFrame(step);
+    }
+
+    function visitNext(index) {
+      if (thisplugin._walkSimState !== state) return;
+      if (index >= stops.length) {
+        // Done: stop animating, but leave the trail/links/fields and the map-click handler in
+        // place — thisplugin.stopWalkSim() only runs (clearing everything) once the player taps
+        // the map, so the finished result stays visible until then.
+        thisplugin._walkSimState = null;
+        return;
+      }
+
+      var stop = stops[index];
+      centerIfOffscreen(stop.latlng);
+
+      function settleHere() {
+        if (visited.length) totalDistanceSoFar += visited[visited.length - 1].distanceTo(stop.latlng);
+        visited.push(stop.latlng);
+        trail.setLatLngs(visited);
+        head.setLatLng(stop.latlng);
+        if (thisplugin.walkSimShowLinks) {
+          (stop.links || []).forEach(function (targetLatLng) {
+            L.polyline([stop.latlng, targetLatLng], {
+              color: '#00e5ff', weight: 1.5, opacity: 0.7, interactive: false
+            }).addTo(thisplugin.walkSimLayerGroup);
+          });
+          (stop.fields || []).forEach(function (fieldLatLngs) {
+            L.polygon(fieldLatLngs, {
+              color: '#00e5ff', weight: 1, opacity: 0.6, fillColor: '#00e5ff', fillOpacity: 0.15, interactive: false
+            }).addTo(thisplugin.walkSimLayerGroup);
+          });
+          totalLinksSoFar += (stop.links || []).length;
+          totalFieldsSoFar += (stop.fields || []).length;
+          if (thisplugin.walkSimCounterEl) {
+            thisplugin.walkSimCounterEl.text('Links: ' + totalLinksSoFar + ' · Fields: ' + totalFieldsSoFar +
+              ' · Distance: ' + thisplugin.formatDistance(totalDistanceSoFar));
+          }
+        }
+        state.timeoutId = setTimeout(function () { visitNext(index + 1); }, thisplugin.WALK_SIM_DWELL_MS);
+      }
+
+      if (index === 0) {
+        settleHere();
+      } else {
+        // animateSegment only ever reads `visited` (via .concat, never mutating it) to draw its
+        // own live tail point each frame, so it's still exactly the stops reached so far here.
+        animateSegment(stops[index - 1].latlng, stop.latlng, function () {
+          if (thisplugin._walkSimState !== state) return;
+          settleHere();
+        });
+      }
+    }
+
+    visitNext(0);
   };
 
   // ---------------------------------------------------------------------
@@ -4329,6 +4673,24 @@ function wrapper(plugin_info) {
 
       `);
     };
+
+    // Walk sim: small floating counter of links/fields seen so far while the sim runs.
+    addCSS('\n' +
+      '.plugin_fanfields3_walksim_counter {\n' +
+      '  position: fixed;\n' +
+      '  top: 10px;\n' +
+      '  right: 10px;\n' +
+      '  z-index: 10000;\n' +
+      '  background-color: rgba(8, 60, 78, 0.9);\n' +
+      '  color: #00e5ff;\n' +
+      '  border: 1px solid #00e5ff;\n' +
+      '  border-radius: 4px;\n' +
+      '  padding: 6px 12px;\n' +
+      '  font-size: 13px;\n' +
+      '  font-weight: bold;\n' +
+      '  pointer-events: none;\n' +
+      '}\n'
+    );
 
     // Keys video review table: every cell, checkbox and count field on the same line, numbers
     // centered under their headers.
@@ -7018,12 +7380,14 @@ function wrapper(plugin_info) {
     }
 
 
-    // Issue #96: validate plan against under-field link distance constraints
-    thisplugin.validateUnderFieldLinks();
-
     // Link order optimization: recompute once when something invalidated it (anchor/order/
     // geometry change) — never on every recalculation, so manual tweaks made on top via the
-    // Task List ↔ button are left alone otherwise.
+    // Task List ↔ button are left alone otherwise. Checked BEFORE validateUnderFieldLinks()
+    // below: this branch always ends in a full updateLayer() re-run (which validates the
+    // rebuilt plan itself), so validating the about-to-be-discarded pre-optimization plan here
+    // first would just be thrown away — skipping it avoids a wasted getDisplayOrder() pass
+    // (and, in RADIATING mode, a second budgeted outbound-prefix-order search) on every anchor
+    // change.
     if (thisplugin._linkOrderRecomputePending && thisplugin.linkOrderMode !== thisplugin.linkOrderModeENUM.ALGO) {
       thisplugin._linkOrderRecomputePending = false;
 
@@ -7044,6 +7408,9 @@ function wrapper(plugin_info) {
       thisplugin.updateLayer();
       return;
     }
+
+    // Issue #96: validate plan against under-field link distance constraints
+    thisplugin.validateUnderFieldLinks();
 
     thisplugin.drawContext = { n: n, triangles: triangles, centerOutgoings: centerOutgoings, centerSbul: centerSbul };
     thisplugin.drawPlan();
@@ -7525,7 +7892,8 @@ function wrapper(plugin_info) {
       respectIntelLinksMode: thisplugin.respectIntelLinksMode,
       useBookmarksOnly: thisplugin.use_bookmarks_only,
       manageBlockers: thisplugin.manageBlockers,
-      blockerMaxDetourM: thisplugin.blockerMaxDetourM
+      blockerMaxDetourM: thisplugin.blockerMaxDetourM,
+      walkSimShowLinks: thisplugin.walkSimShowLinks
     };
   };
 
@@ -7541,6 +7909,7 @@ function wrapper(plugin_info) {
     if (typeof saved.useBookmarksOnly === 'boolean') thisplugin.use_bookmarks_only = saved.useBookmarksOnly;
     if (typeof saved.manageBlockers === 'boolean') thisplugin.manageBlockers = saved.manageBlockers;
     if (typeof saved.blockerMaxDetourM === 'number') thisplugin.blockerMaxDetourM = saved.blockerMaxDetourM;
+    if (typeof saved.walkSimShowLinks === 'boolean') thisplugin.walkSimShowLinks = saved.walkSimShowLinks;
   };
 
   // The current anchor, persisted continuously (every updateLayer() run — see where
@@ -7644,6 +8013,13 @@ function wrapper(plugin_info) {
         '</select></div>';
     }
 
+    html += '<div class="plugin_fanfields3_options_row">' +
+      '<label for="plugin_fanfields3_opt_walksim_links" title="While Walk sim plays, also draw each portal\'s own links (thin cyan) as the walk reaches it">Walk&nbsp;sim&nbsp;links</label>' +
+      '<select id="plugin_fanfields3_opt_walksim_links">' +
+      '<option value="on"' + (thisplugin.walkSimShowLinks ? ' selected' : '') + '>On</option>' +
+      '<option value="off"' + (!thisplugin.walkSimShowLinks ? ' selected' : '') + '>Off</option>' +
+      '</select></div>';
+
     html += '</div>';
 
     var width = 380;
@@ -7696,6 +8072,11 @@ function wrapper(plugin_info) {
     $('#plugin_fanfields3_opt_portals').on('change', function () {
       var wantBookmarksOnly = ($(this).val() === 'bookmarks');
       if (wantBookmarksOnly !== thisplugin.use_bookmarks_only) thisplugin.useBookmarksOnly();
+      thisplugin.saveOptionsDefault();
+    });
+
+    $('#plugin_fanfields3_opt_walksim_links').on('change', function () {
+      thisplugin.walkSimShowLinks = ($(this).val() === 'on');
       thisplugin.saveOptionsDefault();
     });
   };
@@ -7957,6 +8338,11 @@ function wrapper(plugin_info) {
     });
 
     window.map.on('moveend', function () {
+      // Walk sim pans the map itself as it goes (see centerIfOffscreen in startWalkSim): a
+      // full plan recalculation right then would stall the main thread mid-animation, making
+      // the dot appear to jump over several stops at once. The sim touches no plan state, so
+      // there's nothing here worth recalculating for anyway.
+      if (thisplugin._walkSimState) return;
       thisplugin.delayedUpdateLayer(0.5);
     });
     window.map.on('overlayadd overlayremove', function () {
