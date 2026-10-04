@@ -81,8 +81,62 @@
     $('nav').hidden = true;
     $('loginView').hidden = false;
     if ($('passwordDialog').open) $('passwordDialog').close();
+    stopLivePolling();
     const input = $('loginForm').elements.user;
     if (!input.value) input.focus(); else $('loginForm').elements.password.focus();
+  }
+
+  // ---- Carte "maintenant" (joueurs actifs sur les 30 dernières minutes) ----
+
+  const LIVE_POLL_MS = 20 * 1000;
+  let liveTimer = null;
+
+  function startLivePolling() {
+    stopLivePolling();
+    loadActive();
+    liveTimer = setInterval(loadActive, LIVE_POLL_MS);
+  }
+  function stopLivePolling() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  }
+
+  function loadActive() {
+    return api('active', {}).then(renderActive).catch(function (e) {
+      // Rafraîchissement silencieux : une erreur ponctuelle (réseau, 401 déjà géré par api())
+      // ne doit pas spammer de toast toutes les 20 secondes.
+      if (e.status !== 401) console.error('active poll failed', e);
+    });
+  }
+
+  function renderActive(res) {
+    $('liveTotal').textContent = String(res.total);
+
+    const byRegion = {};
+    res.byRegion.forEach(function (r) { byRegion[r.region] = r.count; });
+    const geoMax = res.byRegion.reduce(function (m, r) {
+      return r.region === 'other' ? m : Math.max(m, r.count);
+    }, 0) || 1;
+
+    document.querySelectorAll('#worldMap .region-shape').forEach(function (shape) {
+      const count = byRegion[shape.dataset.region] || 0;
+      shape.style.fillOpacity = count === 0 ? '0' : String(0.15 + 0.75 * (count / geoMax));
+    });
+    document.querySelectorAll('#worldMap .region-count').forEach(function (label) {
+      label.textContent = String(byRegion[label.dataset.region] || 0);
+    });
+
+    renderLiveLegend(res.byRegion);
+  }
+
+  function renderLiveLegend(rows) {
+    const box = $('liveLegend');
+    box.textContent = '';
+    rows.forEach(function (r) {
+      const row = el('div', 'live-legend-row');
+      row.appendChild(el('span', null, REGION_LABELS[r.region] || r.region));
+      row.appendChild(el('span', 'live-legend-count', String(r.count)));
+      box.appendChild(row);
+    });
   }
 
   function showMain() {
@@ -90,6 +144,7 @@
     $('mainView').hidden = false;
     $('nav').hidden = false;
     load();
+    startLivePolling();
   }
 
   function dateInputValue(d) { return d.toISOString().slice(0, 10); }

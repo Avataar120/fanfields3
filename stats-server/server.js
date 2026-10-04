@@ -122,10 +122,11 @@ function makeCounter(windowMs) {
 const collectLimiter = makeCounter(WINDOW_MS);
 const loginFailures = makeCounter(LOGIN_WINDOW_MS);
 
-// Dernier ping vu par agent (hash -> ts), pour transformer deux pings consécutifs en durée dans
-// handleCollect. Purgé ci-dessous comme les autres : une entrée plus vieille que SESSION_GAP_MS
-// aurait de toute façon donné 0 seconde au prochain ping, la purge ne fait qu'éviter de la
-// garder en mémoire indéfiniment pour un agent qui ne revient jamais.
+// Dernier ping vu par agent (hash -> { ts, region }), pour transformer deux pings consécutifs en
+// durée dans handleCollect, et pour savoir qui est actif "maintenant" (voir activeNow). Purgé
+// ci-dessous comme les autres : une entrée plus vieille que SESSION_GAP_MS aurait de toute façon
+// donné 0 seconde au prochain ping et ne compterait plus comme active, la purge ne fait qu'éviter
+// de la garder en mémoire indéfiniment pour un agent qui ne revient jamais.
 const lastSeen = new Map();
 
 setInterval(function () {
@@ -133,7 +134,7 @@ setInterval(function () {
   loginFailures.purge();
   purgeSessions();
   const cutoff = Date.now() - SESSION_GAP_MS;
-  lastSeen.forEach(function (ts, agent) { if (ts < cutoff) lastSeen.delete(agent); });
+  lastSeen.forEach(function (v, agent) { if (v.ts < cutoff) lastSeen.delete(agent); });
 }, 60 * 1000).unref();
 
 // ---- Mots de passe (admin uniquement : un seul compte) ----
@@ -314,6 +315,27 @@ function aggregate(from, to, factionFilter, regionFilter) {
   };
 }
 
+// Joueurs actifs "maintenant" par région : agents ayant pingé dans les SESSION_GAP_MS (30 min)
+// qui précèdent. Lu directement depuis lastSeen (mémoire du processus, pas les fichiers
+// d'événements) : un redémarrage du serveur remet ce compteur à zéro, ce qui convient pour un
+// indicateur de présence instantanée plutôt qu'un historique.
+function activeNow() {
+  const cutoff = Date.now() - SESSION_GAP_MS;
+  const counts = {};
+  REGIONS.forEach(function (r) { counts[r] = 0; });
+  let total = 0;
+  lastSeen.forEach(function (v) {
+    if (v.ts < cutoff) return;
+    counts[v.region]++;
+    total++;
+  });
+  return {
+    windowSeconds: Math.round(SESSION_GAP_MS / 1000),
+    total: total,
+    byRegion: REGIONS.map(function (r) { return { region: r, count: counts[r] }; })
+  };
+}
+
 // ---- Routes publiques ----
 function handleCollect(req, res, body) {
   if (body.v !== PROTOCOL_VERSION) return send(res, 426, { error: 'upgrade required' });
@@ -334,11 +356,12 @@ function handleCollect(req, res, body) {
   // refermé entre les deux, et ce temps-là ne compte pas.
   const now = Date.now();
   const previous = lastSeen.get(agent);
-  const gap = previous ? now - previous : 0;
+  const gap = previous ? now - previous.ts : 0;
   const seconds = (gap > 0 && gap <= SESSION_GAP_MS) ? Math.min(MAX_SECONDS_PER_EVENT, Math.round(gap / 1000)) : 0;
-  lastSeen.set(agent, now);
+  const region = regionForIp(ip);
+  lastSeen.set(agent, { ts: now, region: region });
 
-  appendEvent({ ts: now, agent: agent, faction: faction, region: regionForIp(ip), seconds: seconds });
+  appendEvent({ ts: now, agent: agent, faction: faction, region: region, seconds: seconds });
   send(res, 204);
 }
 
@@ -391,6 +414,10 @@ function handleAdminApi(req, res, route, body) {
         send(res, 200, { ok: true });
       });
     });
+  }
+
+  if (route === 'active') {
+    return send(res, 200, activeNow());
   }
 
   if (route === 'stats') {

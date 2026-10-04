@@ -139,6 +139,57 @@ button:disabled { opacity: .6; cursor: default; }
 
 .card + .card { margin-top: 16px; }
 
+.live-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.live-head h2 { margin: 0; }
+.live-head h2 .muted { font-size: 13px; font-weight: 400; }
+.live-total { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.live-total .muted { font-size: 13px; font-weight: 400; margin-left: 4px; }
+
+.worldmap-wrap { margin-top: 10px; }
+#worldMap { width: 100%; height: auto; display: block; }
+.region-shape {
+  fill: var(--accent);
+  fill-opacity: 0;
+  stroke: var(--border);
+  stroke-width: .6;
+  stroke-linejoin: round;
+  transition: fill-opacity .4s;
+}
+.region-count {
+  font: 700 17px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  fill: var(--text);
+  text-anchor: middle;
+  dominant-baseline: middle;
+  paint-order: stroke fill;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.live-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 2px 20px;
+  margin-top: 14px;
+  font-size: 13px;
+}
+.live-legend-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.live-legend-count { font-variant-numeric: tabular-nums; font-weight: 600; }
+
 .history {
   display: flex;
   align-items: flex-end;
