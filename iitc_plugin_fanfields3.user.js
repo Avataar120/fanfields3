@@ -1419,6 +1419,10 @@ function wrapper(plugin_info) {
         'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>). ' +
         'Its <i>Walk&nbsp;sim</i> button closes the list and previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached (toggle in Options: <i>Walk&nbsp;sim&nbsp;links</i>); tap the map to dismiss it.</p>' +
 
+        '<p><b>Statistics</b><br>' +
+        'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Real activity</i> section showing how many links and fields your faction has actually thrown/formed in-game, read straight from the Intel — not from the plan — so you can compare progress against the plan. ' +
+        'Switch its window (<i>Today</i>, <i>2&nbsp;days</i>, <i>7&nbsp;days</i>) to count further back; it refreshes on its own while the window stays open.</p>' +
+
         '<hr noshade>' +
 
         '<p>Found a bug? Post your issues at GitHub:<br>' +
@@ -1447,11 +1451,72 @@ function wrapper(plugin_info) {
     return total;
   };
 
+  // Real activity (Task List "Stats" window): how many links/fields of the player's own
+  // faction were actually thrown/formed in-game within a trailing window, counted straight
+  // from the live INTEL data (window.links/window.fields) rather than the plan's own computed
+  // links/fields — so it can be compared against what the plan itself calls for. A link/field
+  // entity's own timestamp (ms since epoch) is set once, at creation, and never changes
+  // afterwards (it's only ever created or destroyed) — see IITC's own
+  // Renderer.prototype.createLinkEntity/createFieldEntity — so this is exactly its throw/
+  // creation time, not a "last seen" time.
+  thisplugin.STATS_ACTIVITY_WINDOWS = [
+    { key: 'today', label: 'Today' },
+    { key: '2d', label: '2 days' },
+    { key: '7d', label: '7 days' }
+  ];
+  thisplugin.statsActivityWindow = 'today';
+
+  // The cutoff timestamp (ms since epoch) for a given window: local midnight for 'today' (i.e.
+  // since the day's first link/field), else a rolling N*24h lookback.
+  thisplugin.getActivityWindowCutoff = function (mode) {
+    if (mode === '2d') return Date.now() - 2 * 24 * 60 * 60 * 1000;
+    if (mode === '7d') return Date.now() - 7 * 24 * 60 * 60 * 1000;
+    var now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  };
+
+  thisplugin.computeRealActivityStats = function (mode) {
+    var result = { links: 0, fields: 0 };
+    var ownTeam = thisplugin.getOwnFactionTeam();
+    if (ownTeam === undefined) return result;
+
+    var cutoff = thisplugin.getActivityWindowCutoff(mode);
+
+    for (var lguid in window.links) {
+      var link = window.links[lguid];
+      if (link.options.team === ownTeam && link.options.timestamp >= cutoff) result.links++;
+    }
+    for (var fguid in window.fields) {
+      var field = window.fields[fguid];
+      if (field.options.team === ownTeam && field.options.timestamp >= cutoff) result.fields++;
+    }
+    return result;
+  };
+
+  thisplugin.buildRealActivityHTML = function () {
+    var stats = thisplugin.computeRealActivityStats(thisplugin.statsActivityWindow);
+
+    var html = '<hr noshade><div class="plugin_fanfields3_activity">';
+    html += '<div class="plugin_fanfields3_activity_title">Real activity (from Intel, own faction)</div>';
+    html += '<table><tr><td>Links thrown:</td><td>' + stats.links + '</td></tr>';
+    html += '<tr><td>Fields created:</td><td>' + stats.fields + '</td></tr></table>';
+    html += '<div class="plugin_fanfields3_activity_buttons">';
+    thisplugin.STATS_ACTIVITY_WINDOWS.forEach(function (w) {
+      html += '<button type="button" class="plugin_fanfields3_activity_btn' +
+        (thisplugin.statsActivityWindow === w.key ? ' plugin_fanfields3_activity_btn_active' : '') +
+        '" data-window="' + w.key + '">' + w.label + '</button>';
+    });
+    html += '</div></div>';
+    return html;
+  };
+
   // Statistics dialog: build the HTML for the current plan. Used both to open the dialog and
   // to refresh it live (see thisplugin.refreshStatisticsIfOpen) as the background plan changes.
   thisplugin.buildStatisticsHTML = function () {
+    var activityHtml = thisplugin.buildRealActivityHTML();
+
     if (!thisplugin.sortedFanpoints || thisplugin.sortedFanpoints.length <= 3) {
-      return '<p>No Fanfield plan calculated yet.<br>Draw a polygon and let Fanfields calculate first.</p>';
+      return '<p>No Fanfield plan calculated yet.<br>Draw a polygon and let Fanfields calculate first.</p>' + activityHtml;
     }
 
     var totalLinks = thisplugin.donelinks.length;
@@ -1474,7 +1539,8 @@ function wrapper(plugin_info) {
       '<tr><td>Build AP (links and fields):</td><td>' + (validLinks * 313 + validFields * 1250).toString() + '</td><tr>' +
       '<tr><td>Total walk distance:</td><td>' + thisplugin.formatDistance(thisplugin.computeTotalWalkDistance()) + '</td><tr>' +
       warn +
-      '</table>';
+      '</table>' +
+      activityHtml;
   };
 
   // Whether the Statistics dialog is currently open and visible.
@@ -1482,11 +1548,21 @@ function wrapper(plugin_info) {
     return $('#plugin_fanfields3_statistics_inner').is(':visible');
   };
 
+  thisplugin.wireStatisticsHandlers = function () {
+    $('#plugin_fanfields3_statistics_inner')
+      .off('click.plugin_fanfields3_activity')
+      .on('click.plugin_fanfields3_activity', '.plugin_fanfields3_activity_btn', function () {
+        thisplugin.statsActivityWindow = $(this).attr('data-window');
+        thisplugin.refreshStatisticsDialog();
+      });
+  };
+
   // Rebuild the Statistics dialog's content in place. Used to auto-refresh live as the
   // background plan changes (new links appearing in-game, fan field rotation, etc.), mirroring
   // thisplugin.refreshTaskListDialog for the Task List.
   thisplugin.refreshStatisticsDialog = function () {
     $('#plugin_fanfields3_statistics_inner').html(thisplugin.buildStatisticsHTML());
+    thisplugin.wireStatisticsHandlers();
   };
 
   // Called after every plan recalculation (see updateLayer) so an open Statistics dialog
@@ -1498,8 +1574,6 @@ function wrapper(plugin_info) {
   };
 
   thisplugin.showStatistics = function () {
-    if (!thisplugin.sortedFanpoints || thisplugin.sortedFanpoints.length <= 3) return;
-
     var width = 400;
     thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
     if (thisplugin.MaxDialogWidth < width) {
@@ -1534,6 +1608,8 @@ function wrapper(plugin_info) {
       $('#dialog-plugin_fanfields3_alert_statistics')
         .dialog('option', 'position', { my: 'bottom', at: 'bottom-15', of: window });
     }
+
+    thisplugin.wireStatisticsHandlers();
   }
 
   thisplugin.exportTasks = function () {
@@ -4794,6 +4870,29 @@ function wrapper(plugin_info) {
     addCSS('\n' +
       '#plugin_fanfields3_pickanchor_btn.plugin_fanfields3_active,\n' +
       '#fanfieldExcludePortalButton.plugin_fanfields3_active {\n' +
+      '  box-shadow: 0 0 0 2px #ffce00 inset;\n' +
+      '  color: #ffce00;\n' +
+      '}\n'
+    );
+
+    // Statistics dialog: the real-activity section (links/fields actually seen in Intel within
+    // the chosen trailing window) and its Today/2 days/7 days toggle buttons.
+    addCSS('\n' +
+      '.plugin_fanfields3_activity_title {\n' +
+      '  font-weight: bold;\n' +
+      '  margin-bottom: 4px;\n' +
+      '}\n' +
+      '.plugin_fanfields3_activity_buttons {\n' +
+      '  margin-top: 6px;\n' +
+      '  display: flex;\n' +
+      '  gap: 4px;\n' +
+      '}\n' +
+      '.plugin_fanfields3_activity_btn {\n' +
+      '  flex: 1 1 auto;\n' +
+      '  cursor: pointer;\n' +
+      '}\n' +
+      '.plugin_fanfields3_activity_btn_active {\n' +
+      '  font-weight: bold;\n' +
       '  box-shadow: 0 0 0 2px #ffce00 inset;\n' +
       '  color: #ffce00;\n' +
       '}\n'
@@ -8919,19 +9018,23 @@ function wrapper(plugin_info) {
       thisplugin.forceMapDataRefresh();
     });
 
-    // Keep an open Task List current between plan recalculations — available key counts
-    // (LiveInventory/Keys plugin) and in-game link/portal completion can change on their own
-    // timeline, not just when this plugin recomputes the plan. Refreshes live game data
-    // (thisplugin.locations/intelLinks) itself first, rather than only repainting from
+    // Keep an open Task List or Statistics dialog current between plan recalculations —
+    // available key counts (LiveInventory/Keys plugin), in-game link/portal completion and the
+    // Statistics dialog's own real-activity counts (straight from INTEL) can all change on
+    // their own timeline, not just when this plugin recomputes the plan. Refreshes live game
+    // data (thisplugin.locations/intelLinks) itself first, rather than only repainting from
     // whatever a mapDataRefreshEnd/requestFinished hook last put there: on some platforms
     // (observed on IITC Mobile) IITC's own map updates without those hooks ever firing for
     // this plugin, which would otherwise leave the Task List showing a stale, already-thrown
     // link as still outstanding indefinitely.
     setInterval(function () {
-      if (thisplugin.isTaskListDialogOpen()) {
-        thisplugin.refreshLiveGameData();
-        thisplugin.refreshTaskListDialog();
-      }
+      var taskListOpen = thisplugin.isTaskListDialogOpen();
+      var statisticsOpen = thisplugin.isStatisticsDialogOpen();
+      if (!taskListOpen && !statisticsOpen) return;
+
+      thisplugin.refreshLiveGameData();
+      if (taskListOpen) thisplugin.refreshTaskListDialog();
+      if (statisticsOpen) thisplugin.refreshStatisticsDialog();
     }, 10000);
 
     window.addLayerGroup('Fanfields links', thisplugin.linksLayerGroup, false);
