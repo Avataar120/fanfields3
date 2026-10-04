@@ -5790,6 +5790,12 @@ function wrapper(plugin_info) {
   thisplugin.KEYS_VIDEO_WIDTH = 1080;       // frames are scaled to this width before OCR
   thisplugin.KEYS_VIDEO_WHITE_MIN = 180;    // a pixel is text when its R, G and B are all above this
   thisplugin.KEYS_VIDEO_MATCH_MIN = 0.78;   // minimum name similarity (0..1) to accept a match
+  thisplugin.KEYS_VIDEO_DIFF_GRID = [16, 64]; // [cols, rows] of the frame-change check
+  thisplugin.KEYS_VIDEO_DIFF_MIN = 0.05;    // relative change in that grid for a new frame
+  // OCR is the slow part (not reading the video itself), and each Tesseract worker is its own
+  // thread, so running several in parallel is close to a free speedup on a multi-core device. One
+  // core is left for the main thread (video seeking, canvas prep, UI).
+  thisplugin.KEYS_VIDEO_WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
 
   thisplugin.loadTesseract = function () {
     if (window.Tesseract) return Promise.resolve(window.Tesseract);
@@ -5926,6 +5932,11 @@ function wrapper(plugin_info) {
   // Ingress writes names and counts in white over darkened photos, so only near-white pixels are
   // kept, as black text on white. This also drops the red level digit, the blue resonator bars
   // and most of the photo. Returns null when the frame looks the same as the previous one read.
+  //
+  // The frame-change check below reads the already-thresholded full-resolution data (not a
+  // cheap downscaled preview): a small blown-up grid loses exactly the kind of thin, short-lived
+  // text strokes a fast scroll produces, which silently dropped real frames and tanked the OCR
+  // match rate — worth the extra full-resolution pass per sampled frame to not risk that again.
   thisplugin.prepareKeysOcrFrame = function (source, width, height, state) {
     var scale = thisplugin.KEYS_VIDEO_WIDTH / width;
     var w = Math.max(1, Math.round(width * scale)), h = Math.max(1, Math.round(height * scale));
@@ -5941,8 +5952,7 @@ function wrapper(plugin_info) {
       d[i] = d[i + 1] = d[i + 2] = Math.min(d[i], d[i + 1], d[i + 2]) > thisplugin.KEYS_VIDEO_WHITE_MIN ? 0 : 255;
     }
 
-    // Small signature of the frame to skip frames identical to the last one read.
-    var sig = [], gx = 16, gy = 64;
+    var sig = [], gx = thisplugin.KEYS_VIDEO_DIFF_GRID[0], gy = thisplugin.KEYS_VIDEO_DIFF_GRID[1];
     for (var sy = 0; sy < gy; sy++) {
       for (var sx = 0; sx < gx; sx++) {
         var x0 = Math.floor(sx * w / gx), y0 = Math.floor(sy * h / gy);
@@ -5956,7 +5966,7 @@ function wrapper(plugin_info) {
     if (state.lastSig) {
       var diff = 0, total = 1;
       for (var k = 0; k < sig.length; k++) { diff += Math.abs(sig[k] - state.lastSig[k]); total += sig[k]; }
-      if (diff / total < 0.05) return null;
+      if (diff / total < thisplugin.KEYS_VIDEO_DIFF_MIN) return null;
     }
     state.lastSig = sig;
 
@@ -6005,23 +6015,68 @@ function wrapper(plugin_info) {
     });
   };
 
+  // Runs OCR jobs with at most `limit` running at once (one Tesseract worker each). wait()
+  // resolves once a slot is free, so a caller can throttle how fast it hands out work without
+  // buffering unlimited frames ahead of what the pool can process; drain() waits for whatever is
+  // still running. Never rejects itself even when a job does — callers catch their own job.
+  thisplugin.makeKeysOcrPool = function (limit) {
+    var active = new Set();
+    var neverReject = function (p) { return p.then(function () {}, function () {}); };
+    return {
+      wait: async function () {
+        while (active.size >= limit) await Promise.race(Array.from(active).map(neverReject));
+      },
+      run: function (job) {
+        var p = job();
+        active.add(p);
+        var cleanup = function () { active.delete(p); };
+        p.then(cleanup, cleanup);
+        return p;
+      },
+      drain: function () { return Promise.allSettled(Array.from(active)); }
+    };
+  };
+
+  // Tried tuning tessedit_pageseg_mode (SPARSE_TEXT) and switching off the English dictionary
+  // here, to save a bit more OCR time on top of running several workers at once — reverted:
+  // it badly hurt the match rate in practice (SPARSE_TEXT skips the page-layout analysis that
+  // apparently matters for this card layout). Left as a plain, untuned worker, same as before
+  // the workers were parallelized.
+  thisplugin.createKeysOcrWorker = async function (Tesseract) {
+    return Tesseract.createWorker('eng');
+  };
+
   // OCRs every file (videos: one frame every KEYS_VIDEO_FRAME_STEP seconds) and returns
-  // guid -> the count read most often for that portal (the highest one on a tie).
+  // guid -> the count read most often for that portal (the highest one on a tie). Several
+  // Tesseract workers run at once (KEYS_VIDEO_WORKERS): OCR, not reading the video, is the slow
+  // part of this, and each worker is its own thread, so the next frame's seek and threshold keep
+  // running on the main thread while earlier frames are still being recognized.
   thisplugin.readKeysFromFiles = async function (files, candidates, onProgress, isCancelled) {
     var Tesseract = await thisplugin.loadTesseract();
     onProgress('Loading text recognition…');
-    var worker = await Tesseract.createWorker('eng');
+    var workers = await Promise.all(Array.from({ length: thisplugin.KEYS_VIDEO_WORKERS },
+      function () { return thisplugin.createKeysOcrWorker(Tesseract); }));
+    var pool = thisplugin.makeKeysOcrPool(workers.length);
+    var nextWorker = 0;
     var votes = {};
     var framesRead = 0;
-    var ocr = async function (canvas) {
-      var result = await worker.recognize(canvas);
-      framesRead++;
-      var found = thisplugin.matchKeysInText(result.data.text, candidates);
-      Object.keys(found).forEach(function (guid) {
-        votes[guid] = votes[guid] || {};
-        votes[guid][found[guid]] = (votes[guid][found[guid]] || 0) + 1;
-      });
+
+    var submit = async function (canvas) {
+      await pool.wait();
+      if (isCancelled()) return;
+      var worker = workers[nextWorker];
+      nextWorker = (nextWorker + 1) % workers.length;
+      pool.run(async function () {
+        var result = await worker.recognize(canvas);
+        framesRead++;
+        var found = thisplugin.matchKeysInText(result.data.text, candidates);
+        Object.keys(found).forEach(function (guid) {
+          votes[guid] = votes[guid] || {};
+          votes[guid][found[guid]] = (votes[guid][found[guid]] || 0) + 1;
+        });
+      }).catch(function (e) { if (!isCancelled()) console.error('Fan Fields 3 - Keys video OCR', e); });
     };
+
     try {
       for (var f = 0; f < files.length && !isCancelled(); f++) {
         var file = files[f];
@@ -6030,7 +6085,8 @@ function wrapper(plugin_info) {
         if (/^image\//.test(file.type)) {
           onProgress('Reading image' + label + '…');
           var img = await thisplugin.loadKeysImage(file);
-          await ocr(thisplugin.prepareKeysOcrFrame(img, img.naturalWidth, img.naturalHeight, state));
+          var icanvas = thisplugin.prepareKeysOcrFrame(img, img.naturalWidth, img.naturalHeight, state);
+          if (icanvas) await submit(icanvas);
           URL.revokeObjectURL(img.src);
           continue;
         }
@@ -6041,12 +6097,13 @@ function wrapper(plugin_info) {
           onProgress('Reading video' + label + ': ' + Math.min(100, Math.round(100 * t / (duration || 1))) +
             '% — ' + Object.keys(votes).length + '/' + candidates.length + ' plan portals found');
           var canvas = thisplugin.prepareKeysOcrFrame(video, video.videoWidth, video.videoHeight, state);
-          if (canvas) await ocr(canvas);
+          if (canvas) await submit(canvas);
         }
         URL.revokeObjectURL(video.src);
       }
+      await pool.drain();
     } finally {
-      await worker.terminate();
+      await Promise.all(workers.map(function (w) { return w.terminate(); }));
     }
 
     var counts = {};
