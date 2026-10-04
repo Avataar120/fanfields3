@@ -36,6 +36,7 @@ function wrapper(plugin_info) {
       version: '6.1.1',
       changes: [
         'FIX: On mobile, the "Keys video" counts review window was still a bit too tall, with its Apply/Cancel buttons running under the phone\'s navigation bar.',
+        'FIX: Reading a "Keys video" recording no longer gets stuck when the phone\'s screen locks and unlocks during the read.',
       ],
     },{
       version: '6.1.0',
