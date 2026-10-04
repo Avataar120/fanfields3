@@ -6206,10 +6206,17 @@ function wrapper(plugin_info) {
     var $content = $('#dialog-plugin_fanfields3_keysvideo');
     if (!$content.length) return;
     var $ui = $content.closest('.ui-dialog');
+    // A bit more generous than getMaxDialogHeight()'s own mobile clearance: this dialog's
+    // bottom button row stays clear of the phone's nav bar with less margin than that shared
+    // default assumes, so it can use more of the screen — kept local to this dialog rather
+    // than lowering that margin for every other dialog too.
+    var vh = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight;
+    var bottomClearance = L.Browser.mobile ? 80 : 20;
+    var maxDialogHeight = Math.max(200, Math.floor(vh) - bottomClearance);
     $ui.css({
       'background': 'rgb(8, 48, 78)',
       'opacity': 1,
-      'max-height': thisplugin.getMaxDialogHeight() + 'px',
+      'max-height': maxDialogHeight + 'px',
       'display': 'flex',
       'flex-direction': 'column'
     });
