@@ -1608,10 +1608,26 @@ function wrapper(plugin_info) {
     // centering, so the dialog doesn't sit over the middle of the map where the portals are.
     // IITC's window.dialog() prefixes the id we pass with "dialog-" for the actual jQuery UI
     // element (see addTaskListShiftButtons) — '#plugin_fanfields3_alert_statistics' alone
-    // matches nothing.
+    // matches nothing. The phone's own on-screen navigation bar (or the app's persistent
+    // bottom toolbar) commonly overlaps the bottom of the visible viewport without being
+    // reflected in its reported height at all, so a small offset from the literal bottom edge
+    // (as used here before the Real activity section made this dialog taller) ends up hidden
+    // underneath it — same reasoning as thisplugin.getMaxDialogHeight(), whose own clearance
+    // this reuses for both the position offset and a height cap, so a tall dialog also
+    // scrolls its own content instead of growing past the visible area.
     if (isMobile) {
-      $('#dialog-plugin_fanfields3_alert_statistics')
-        .dialog('option', 'position', { my: 'bottom', at: 'bottom-15', of: window });
+      var $statsDialog = $('#dialog-plugin_fanfields3_alert_statistics');
+      var $statsUi = $statsDialog.closest('.ui-dialog');
+      $statsUi.css({
+        'max-height': thisplugin.getMaxDialogHeight() + 'px',
+        'display': 'flex',
+        'flex-direction': 'column'
+      });
+      $statsUi.find('.ui-dialog-content').css({
+        'flex': '1 1 auto',
+        'overflow-y': 'auto'
+      });
+      $statsDialog.dialog('option', 'position', { my: 'bottom', at: 'bottom-' + thisplugin.MOBILE_DIALOG_BOTTOM_CLEARANCE_PX, of: window });
     }
 
     thisplugin.wireStatisticsHandlers();
@@ -8712,16 +8728,20 @@ function wrapper(plugin_info) {
     return Math.max(260, Math.floor(vw) - 12); // leave some space
   };
 
+  // On mobile, the phone's own on-screen navigation bar (or the app's persistent bottom
+  // toolbar) commonly overlaps the bottom of the visible viewport without being reflected in
+  // its reported height at all — an edge-to-edge WebView reports the full screen height, then
+  // the OS/app draws its own controls on top of it. Shared by getMaxDialogHeight() (caps how
+  // tall a dialog may grow) and anything that also positions a dialog relative to the literal
+  // bottom edge (e.g. showStatistics on mobile), so neither a dialog's content nor its own
+  // bottom edge ends up hidden underneath it.
+  thisplugin.MOBILE_DIALOG_BOTTOM_CLEARANCE_PX = 150;
+
   thisplugin.getMaxDialogHeight = function () {
     const vh = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight;
 
-    // On mobile, the phone's own on-screen navigation bar (or the app's persistent bottom
-    // toolbar) commonly overlaps the bottom of the visible viewport without being reflected
-    // in vh/innerHeight at all — an edge-to-edge WebView reports the full screen height, then
-    // the OS/app draws its own controls on top of it. Leave generous extra clearance there so
-    // a dialog's own bottom button row doesn't end up hidden underneath it. Desktop browsers
-    // don't have this problem, so keep their margin minimal.
-    var bottomClearance = (L.Browser.mobile) ? 150 : 20;
+    // Desktop browsers don't have the nav-bar overlap problem above, so keep their margin minimal.
+    var bottomClearance = (L.Browser.mobile) ? thisplugin.MOBILE_DIALOG_BOTTOM_CLEARANCE_PX : 20;
     return Math.max(200, Math.floor(vh) - bottomClearance);
   };
 
