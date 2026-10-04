@@ -6156,6 +6156,12 @@ function wrapper(plugin_info) {
       closeCallback: function () { cancelled = true; }
     });
     thisplugin.pinKeysVideoDialogToTop();
+    // Nothing to apply yet (no recording read) — just a way to close the dialog, same as the
+    // default OK button would, but named for what it actually does here. showKeysVideoReview
+    // adds the "Apply to Keys plugin" button next to this one once there's something to apply.
+    $('#dialog-plugin_fanfields3_keysvideo').dialog('option', 'buttons', {
+      Cancel: function () { $(this).dialog('close'); }
+    });
 
     var $status = $('#plugin_fanfields3_keysvideo_status');
     $('#plugin_fanfields3_keysvideo_file').on('change', function () {
@@ -6219,11 +6225,9 @@ function wrapper(plugin_info) {
       '</tr></thead><tbody>' + rows + '</tbody></table>' +
       '<p><label><input type="checkbox" id="plugin_fanfields3_keysvideo_zero"> ' +
       'Set plan portals not found in the recording to 0 (only if you scrolled through all your keys)</label></p>' +
-      (window.plugin.LiveInventory ? '<p><i>LiveInventory is installed: the Task List shows its counts first.</i></p>' : '') +
-      '<p><button type="button" id="plugin_fanfields3_keysvideo_applybtn">Apply to Keys plugin</button></p>';
+      (window.plugin.LiveInventory ? '<p><i>LiveInventory is installed: the Task List shows its counts first.</i></p>' : '');
 
     var $result = $('#plugin_fanfields3_keysvideo_result').html(html);
-    thisplugin.pinKeysVideoDialogToTop();
 
     // Editing a count ticks that row; the "not found → 0" option ticks/unticks the unseen rows.
     $result.on('input', '.plugin_fanfields3_keysvideo_count', function () {
@@ -6238,22 +6242,28 @@ function wrapper(plugin_info) {
         $(this).find('.plugin_fanfields3_keysvideo_apply').prop('checked', on && current !== 0);
       });
     });
-    $result.on('click', '#plugin_fanfields3_keysvideo_applybtn', function () {
-      var changed = 0;
-      $result.find('tbody tr').each(function () {
-        if (!$(this).find('.plugin_fanfields3_keysvideo_apply').prop('checked')) return;
-        var guid = $(this).attr('data-guid');
-        var target = Math.max(0, parseInt($(this).find('.plugin_fanfields3_keysvideo_count').val(), 10) || 0);
-        var delta = target - (window.plugin.keys.keys[guid] || 0);
-        if (delta !== 0) {
-          window.plugin.keys.addKey(delta, guid);
-          changed++;
-        }
-      });
-      $('#plugin_fanfields3_keysvideo_status').text(changed + ' portal(s) updated in the Keys plugin.');
-      $result.empty();
-      thisplugin.refreshTaskListIfOpen();
+
+    // "Apply to Keys plugin" lives in the dialog's own button pane, next to Cancel, instead of
+    // in the scrolling content above — added here (not at dialog creation) since there's
+    // nothing to apply before a recording has been read.
+    $('#dialog-plugin_fanfields3_keysvideo').dialog('option', 'buttons', {
+      Cancel: function () { $(this).dialog('close'); },
+      'Apply to Keys plugin': function () {
+        $result.find('tbody tr').each(function () {
+          if (!$(this).find('.plugin_fanfields3_keysvideo_apply').prop('checked')) return;
+          var guid = $(this).attr('data-guid');
+          var target = Math.max(0, parseInt($(this).find('.plugin_fanfields3_keysvideo_count').val(), 10) || 0);
+          var delta = target - (window.plugin.keys.keys[guid] || 0);
+          if (delta !== 0) window.plugin.keys.addKey(delta, guid);
+        });
+        thisplugin.refreshTaskListIfOpen();
+        $(this).dialog('close');
+      }
     });
+    // After the buttons above, not before: the button pane's height (now Cancel + Apply,
+    // possibly wrapping to two lines on a narrow dialog) is what the content area's max-height
+    // needs to leave room for.
+    thisplugin.pinKeysVideoDialogToTop();
   };
 
   // Marks the active link order optimization (if any) as needing to be recomputed at the next
