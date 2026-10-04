@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-203000';
+  plugin_info.dateTimeVersion = '2026-10-04-213000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -38,6 +38,7 @@ function wrapper(plugin_info) {
         'FIX: On mobile, the "Keys video" counts review window was still a bit too tall, with its Apply/Cancel buttons running under the phone\'s navigation bar.',
         'FIX: Reading a "Keys video" recording no longer gets stuck when the phone\'s screen locks and unlocks during the read.',
         'FIX: "Less walking" could send you off to a portal that only belongs with a different part of the walk, and back again, instead of leaving it there and visiting a nearby portal right after the anchor like it should.',
+        'FIX: Zooming the map could unlock a Locked plan and recalculate it on the spot, sometimes before all portals around you had finished loading — showing "unknown title" rows in the Task List until they did. Locked now only reacts to an actual change you make to the plan itself.',
       ],
     },{
       version: '6.1.0',
@@ -8881,7 +8882,20 @@ function wrapper(plugin_info) {
       if (thisplugin._walkSimState) return;
       thisplugin.delayedUpdateLayer(0.5);
     });
-    window.map.on('overlayadd overlayremove', function () {
+    // Recalculates (and, if Locked, unlocks for it — see delayedUpdateLayer's userRequested
+    // branch) only when one of THIS plugin's own layers (Links/Fields/Numbers) is toggled —
+    // updateLayer() itself early-returns while none of them are visible, so switching one on
+    // needs a fresh run. Checking e.layer against them specifically matters because Leaflet
+    // fires this same event for every overlay on the map, including ones IITC shows/hides on
+    // its own as the zoom crosses their configured range: without the check, simply zooming
+    // past some unrelated layer's threshold silently unlocked and recalculated the plan,
+    // rebuilding it from whatever portals IITC happened to have loaded at that instant (often
+    // showing "unknown title" rows until the rest streamed in).
+    window.map.on('overlayadd overlayremove', function (e) {
+      if (e.layer !== thisplugin.linksLayerGroup && e.layer !== thisplugin.fieldsLayerGroup &&
+        e.layer !== thisplugin.numbersLayerGroup) {
+        return;
+      }
       setTimeout(function () {
         thisplugin.delayedUpdateLayer(1.0, true);
       }, 1);
