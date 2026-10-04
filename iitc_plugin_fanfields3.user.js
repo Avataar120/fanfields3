@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-183500';
+  plugin_info.dateTimeVersion = '2026-10-04-203000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -37,6 +37,7 @@ function wrapper(plugin_info) {
       changes: [
         'FIX: On mobile, the "Keys video" counts review window was still a bit too tall, with its Apply/Cancel buttons running under the phone\'s navigation bar.',
         'FIX: Reading a "Keys video" recording no longer gets stuck when the phone\'s screen locks and unlocks during the read.',
+        'FIX: "Less walking" could send you off to a portal that only belongs with a different part of the walk, and back again, instead of leaving it there and visiting a nearby portal right after the anchor like it should.',
       ],
     },{
       version: '6.1.0',
@@ -2160,6 +2161,7 @@ function wrapper(plugin_info) {
           : ' — the current order was already the shortest found.') +
         '</div>';
     }
+
     text += '<hr noshade>';
 
     // On mobile, only the next stops still to do are sent (see GOOGLE_MAPS_MAX_STOPS_MOBILE);
@@ -6663,10 +6665,22 @@ function wrapper(plugin_info) {
   // mesh link) is a candidate. Its mesh link flips to point AT it (mesh partner -> portal)
   // when visiting it between its own walk neighbors (whichever portals come right before and
   // right after it in the walk) costs more than skipping straight from one to the other — i.e.
-  // this portal wasn't really "on the way". A portal with outgoing count 1 or 3+ is left
-  // untouched. The mesh partner's own position plays no part in this test: whether it happens
+  // this portal wasn't really "on the way". A portal with outgoing count 1 (only its own anchor
+  // link, no mesh link) gets the same "on the way" check further down, without any flip — there's
+  // nothing to flip, only where it sits in the walk can change. A portal with outgoing count 3+
+  // is left untouched either way: with several mesh links, moving it risks losing a field or
+  // making another one of its own links infeasible, which this simple per-portal check can't
+  // rule out. The mesh partner's own position plays no part in this test: whether it happens
   // to be the walk's previous stop, a later one, or nowhere nearby, "on the way" is decided
   // purely by the portal's own neighbors, via plain triangle inequality.
+  //
+  // Never onto a mesh partner that only has its own anchor link (outgoing count 1) AND is
+  // genuinely closer to the anchor than to this portal's OTHER neighbor (nextFp): flipping
+  // would make that partner depend on this portal being visited first, dragging it away from
+  // wherever it actually belongs. A partner nearer the anchor belongs up front regardless, so
+  // flipping onto it would only shove it out of the way of the very spot it wants; a partner
+  // nearer nextFp's own neighborhood instead belongs there, so the flip is left to go through,
+  // freeing it to be relocated near that neighborhood rather than forced up front by this link.
   //
   // Once flipped, the portal is relocated in the WALK/DISPLAY order only
   // (thisplugin.displayOrderGuids — see computeDistanceOrderReordering), never in
@@ -6716,13 +6730,14 @@ function wrapper(plugin_info) {
       var nextFp = sorted[indexByGuid[e.srcGuid] + 1];
 
       var shouldFlip;
+      var direct;
       if (nextFp) {
         // Triangle inequality on the portal's own neighbors: visiting it (prevFp -> src ->
         // nextFp) only "costs" something over skipping it (prevFp -> nextFp direct) when it's
         // really a detour. A margin avoids flipping over floating-point noise on three
         // near-collinear portals, where there's nothing to gain either way.
         var viaSrc = dist(prevFp.guid, e.srcGuid) + dist(e.srcGuid, nextFp.guid);
-        var direct = dist(prevFp.guid, nextFp.guid);
+        direct = dist(prevFp.guid, nextFp.guid);
         shouldFlip = viaSrc > direct + 1e-6;
       } else {
         // Last portal in the walk: there's no "next" to route around, so it's never really "on
@@ -6731,7 +6746,12 @@ function wrapper(plugin_info) {
         // back at the end, same as leaving it unflipped would have.
         shouldFlip = true;
       }
-      if (!shouldFlip) return;
+
+      var partnerIsDegreeOne = outgoingCountByGuid[e.dstGuid] === 1;
+      var blockedByPartner = shouldFlip && nextFp && partnerIsDegreeOne &&
+        dist(thisplugin.startingpointGUID, e.dstGuid) <= dist(e.dstGuid, nextFp.guid);
+
+      if (!shouldFlip || blockedByPartner) return;
 
       var desiredSrc = e.dstGuid;
       var desiredDst = e.srcGuid;
@@ -6746,6 +6766,31 @@ function wrapper(plugin_info) {
       meshFlippedGuids[e.srcGuid] = true;
       e.srcGuid = desiredSrc;
       e.dstGuid = desiredDst;
+    });
+
+    // Portals with outgoing count 1 (only their own anchor/fan link, no mesh link at all) have
+    // nothing to flip, but the same "on the way" question still applies to where they sit in the
+    // walk: skipped here by the loop above (it only ever looks at mesh links), they'd otherwise
+    // always stay at their bearing-sorted build position even when that's a detour — e.g. a
+    // portal a few meters from the anchor but sorted far from it by angle. Reuses the very same
+    // relocation set and reordering step as the flipped portals above; no feasibility check is
+    // needed first since their link direction never changes, only when they're visited.
+    sorted.forEach(function (fp) {
+      if (fp.guid === thisplugin.startingpointGUID) return;
+      if (outgoingCountByGuid[fp.guid] !== 1) return;
+
+      var prevFp = sorted[indexByGuid[fp.guid] - 1];
+      var nextFp = sorted[indexByGuid[fp.guid] + 1];
+
+      var shouldRelocate;
+      if (nextFp) {
+        var viaSrc = dist(prevFp.guid, fp.guid) + dist(fp.guid, nextFp.guid);
+        var direct = dist(prevFp.guid, nextFp.guid);
+        shouldRelocate = viaSrc > direct + 1e-6;
+      } else {
+        shouldRelocate = true;
+      }
+      if (shouldRelocate) meshFlippedGuids[fp.guid] = true;
     });
 
     var flips = thisplugin.flipsFromDirections(current, naturalByKey);
