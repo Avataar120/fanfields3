@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.2.0.20261004
+// @version         6.2.1.20261004
 // @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links, and route export to Google Maps / Portal Route. Enable from the layer chooser.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-224500';
+  plugin_info.dateTimeVersion = '2026-10-04-231500';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -33,6 +33,11 @@ function wrapper(plugin_info) {
 
   var arcname = (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'Arc' : '***';
   var changelog = [{
+      version: '6.2.1',
+      changes: [
+        'FIX: The automatic "Spend keys on throw" no longer re-spends a key for a link you had already thrown before reloading IITC, or loses track of one thrown while IITC was closed — each link now only ever spends a key once, whenever it\'s first seen.',
+      ],
+    },{
       version: '6.2.0',
       changes: [
         'NEW: The Statistics window now also shows how many links and fields your faction has actually thrown or formed in-game, read straight from the Intel, next to the plan\'s own totals — so you can compare real progress against the plan. A Today / 2 days / 7 days toggle lets you look further back.',
@@ -5365,51 +5370,109 @@ function wrapper(plugin_info) {
   // indexOwnLinks() whenever thisplugin.intelLinks is (re)built.
   thisplugin.ownLinkKeys = {};
 
-  // Throwing a link spends a key to its destination portal. Whenever indexOwnLinks() finds an
-  // own-faction link that wasn't there the previous time (newKeys has it, thisplugin.ownLinkKeys
-  // — the previous run's set — doesn't), that key is now spent: the Keys plugin's own count for
-  // that destination (destByKey) is decremented by 1, never below 0. Skipped on the very first
-  // run (thisplugin._ownLinksBaselineSet still false): with no previous set to compare against,
-  // every link already in-game would otherwise look "new" and get wrongly decremented. Only
-  // window.plugin.keys is touched — LiveInventory is a read-only reflection of the real
-  // inventory and has no such API (same restriction as thisplugin.toggleKeysPluginCount).
+  // Throwing a link spends a key to its destination portal. A link's own Ingress GUID (the key
+  // IITC itself uses in window.links/thisplugin.intelLinks) uniquely and permanently identifies
+  // that one throw — destroying and re-throwing between the same two portals later gets a brand
+  // new GUID — so thisplugin.chargedLinkGuids (persisted to localStorage, see
+  // loadChargedLinkGuids/markLinkGuidsCharged) remembers every own-faction link GUID already
+  // charged a key for, across reloads AND across IITC being closed entirely: a link thrown while
+  // IITC wasn't even running still gets its key deducted as soon as it's next seen, since its
+  // GUID isn't in that persisted set yet. A GUID already in the set is never charged again.
+  // Evaluated only once IITC has fully finished loading the map (thisplugin._mapDataLoading):
+  // while it's still streaming in link data tile by tile, an own link simply hasn't appeared
+  // yet rather than not existing, so waiting avoids treating an incomplete view as if every link
+  // not yet loaded in had just been thrown. The very first time this ever runs for this browser
+  // (thisplugin.CHARGING_INITIALIZED_KEY not yet set), every own link already in-game is seeded
+  // into the charged set without spending anything — only links thrown from that point onward are
+  // charged. Only window.plugin.keys is touched — LiveInventory is a read-only reflection of the
+  // real inventory and has no such API (same restriction as thisplugin.toggleKeysPluginCount).
   // Options dialog toggle ("Spend keys on throw"): on by default.
-  thisplugin._ownLinksBaselineSet = false;
   thisplugin.consumeKeysOnLinkThrown = true;
 
-  thisplugin.consumeKeysForNewLinks = function (newKeys, destByKey) {
-    if (!thisplugin._ownLinksBaselineSet) {
-      thisplugin._ownLinksBaselineSet = true;
+  thisplugin.CHARGED_LINKS_STORAGE_KEY = 'plugin-fanfields3-charged-link-guids';
+  thisplugin.CHARGING_INITIALIZED_KEY = 'plugin-fanfields3-charging-initialized';
+  // Safety cap so a very long-lived install never grows this localStorage entry without bound;
+  // oldest entries are dropped first once exceeded. A dropped entry could in theory be charged
+  // again if its link were ever destroyed and re-thrown decades later between the same two
+  // portals — an acceptable trade-off against unbounded storage growth.
+  thisplugin.CHARGED_LINKS_MAX = 20000;
+
+  thisplugin._chargedLinkGuidSet = null;
+  thisplugin._chargedLinkGuidOrder = null;
+
+  thisplugin.loadChargedLinkGuids = function () {
+    if (thisplugin._chargedLinkGuidSet) return;
+    var stored = [];
+    try {
+      var raw = localStorage.getItem(thisplugin.CHARGED_LINKS_STORAGE_KEY);
+      stored = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(stored)) stored = [];
+    } catch (e) {
+      stored = [];
+    }
+    thisplugin._chargedLinkGuidOrder = stored;
+    thisplugin._chargedLinkGuidSet = new Set(stored);
+  };
+
+  thisplugin.markLinkGuidsCharged = function (guids) {
+    if (!guids.length) return;
+    thisplugin.loadChargedLinkGuids();
+
+    guids.forEach(function (guid) {
+      if (thisplugin._chargedLinkGuidSet.has(guid)) return;
+      thisplugin._chargedLinkGuidSet.add(guid);
+      thisplugin._chargedLinkGuidOrder.push(guid);
+    });
+    if (thisplugin._chargedLinkGuidOrder.length > thisplugin.CHARGED_LINKS_MAX) {
+      thisplugin._chargedLinkGuidOrder.splice(0, thisplugin._chargedLinkGuidOrder.length - thisplugin.CHARGED_LINKS_MAX)
+        .forEach(function (guid) { thisplugin._chargedLinkGuidSet.delete(guid); });
+    }
+    try {
+      localStorage.setItem(thisplugin.CHARGED_LINKS_STORAGE_KEY, JSON.stringify(thisplugin._chargedLinkGuidOrder));
+    } catch (e) { /* storage full or unavailable: charging still works for this session */ }
+  };
+
+  thisplugin.chargeNewlyThrownLinks = function (ownLinks) {
+    if (thisplugin._mapDataLoading) return;
+    thisplugin.loadChargedLinkGuids();
+
+    if (localStorage.getItem(thisplugin.CHARGING_INITIALIZED_KEY) !== '1') {
+      // First time ever on this browser: everything already in-game was thrown before this
+      // feature started tracking it, so it's seeded as already-charged rather than charged now.
+      thisplugin.markLinkGuidsCharged(ownLinks.map(function (o) { return o.linkGuid; }));
+      try {
+        localStorage.setItem(thisplugin.CHARGING_INITIALIZED_KEY, '1');
+      } catch (e) { /* ignore */ }
       return;
     }
+
     if (!thisplugin.consumeKeysOnLinkThrown) return;
     if (!window.plugin.keys || typeof window.plugin.keys.addKey !== 'function') return;
 
-    var oldKeys = thisplugin.ownLinkKeys || {};
-    for (var key in newKeys) {
-      if (oldKeys[key]) continue; // not a newly thrown link
-      var destGuid = destByKey[key];
-      if (!destGuid) continue;
-      var current = window.plugin.keys.keys[destGuid] || 0;
-      if (current > 0) window.plugin.keys.addKey(-1, destGuid);
-    }
+    var newlyCharged = [];
+    ownLinks.forEach(function (o) {
+      if (thisplugin._chargedLinkGuidSet.has(o.linkGuid)) return;
+      var current = window.plugin.keys.keys[o.destGuid] || 0;
+      if (current > 0) window.plugin.keys.addKey(-1, o.destGuid);
+      newlyCharged.push(o.linkGuid);
+    });
+    thisplugin.markLinkGuidsCharged(newlyCharged);
   };
 
   thisplugin.indexOwnLinks = function () {
     var keys = {};
-    var destByKey = {};
+    var ownLinks = [];
     var ownTeam = thisplugin.getOwnFactionTeam();
     if (ownTeam !== undefined) {
-      for (var guid in thisplugin.intelLinks) {
-        var link = thisplugin.intelLinks[guid];
+      for (var linkGuid in thisplugin.intelLinks) {
+        var link = thisplugin.intelLinks[linkGuid];
         if (link.team === ownTeam) {
-          var key = thisplugin.pointPairKey(link.a, link.b);
-          keys[key] = true;
-          if (link.guidB) destByKey[key] = link.guidB;
+          keys[thisplugin.pointPairKey(link.a, link.b)] = true;
+          if (link.guidB) ownLinks.push({ linkGuid: linkGuid, destGuid: link.guidB });
         }
       }
     }
-    thisplugin.consumeKeysForNewLinks(keys, destByKey);
+    thisplugin.chargeNewlyThrownLinks(ownLinks);
     thisplugin.ownLinkKeys = keys;
   };
 
