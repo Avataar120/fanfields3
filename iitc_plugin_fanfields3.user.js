@@ -6200,8 +6200,14 @@ function wrapper(plugin_info) {
     var $ui = $content.closest('.ui-dialog');
     $ui.css({ 'background': 'rgb(8, 48, 78)', 'opacity': 1 });
     var chrome = $ui.outerHeight() - $content.outerHeight();
+    // Extra clearance on top of getMaxDialogHeight()'s own: on mobile, once the review table
+    // and its two bottom buttons (Cancel + Apply) are showing, this dialog still ran a bit
+    // taller than comfortable — other dialogs (Task List, ...) were fine with the shared
+    // height, so this stays local to the Keys video dialog rather than changing that shared
+    // function for everyone.
+    var extraMobileClearance = L.Browser.mobile ? 15 : 0;
     $content.css({
-      'max-height': Math.max(100, thisplugin.getMaxDialogHeight() - chrome) + 'px',
+      'max-height': Math.max(100, thisplugin.getMaxDialogHeight() - chrome - extraMobileClearance) + 'px',
       'overflow-y': 'auto'
     });
     $content.dialog('option', 'position', { my: 'top', at: 'top+10', of: window });
