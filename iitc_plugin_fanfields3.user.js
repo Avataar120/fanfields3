@@ -6011,8 +6011,23 @@ function wrapper(plugin_info) {
 
   thisplugin.seekKeysVideo = function (video, time) {
     return new Promise(function (resolve) {
-      var done = function () { video.removeEventListener('seeked', done); resolve(); };
+      var settled = false;
+      var done = function () {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener('seeked', done);
+        document.removeEventListener('visibilitychange', onVisible);
+        resolve();
+      };
+      // On mobile, locking the screen suspends the video decoder mid-seek, and the 'seeked'
+      // event for that seek never comes — even once the screen is back on. Re-issuing the same
+      // seek once the page is visible again gets the decoder going and still fires 'seeked'
+      // normally, instead of leaving the read stuck forever.
+      var onVisible = function () {
+        if (!document.hidden && !settled) video.currentTime = time;
+      };
       video.addEventListener('seeked', done);
+      document.addEventListener('visibilitychange', onVisible);
       video.currentTime = time;
     });
   };
