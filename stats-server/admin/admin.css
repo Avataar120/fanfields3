@@ -157,8 +157,9 @@ button:disabled { opacity: .6; cursor: default; }
 .region-shape {
   fill: var(--accent);
   fill-opacity: 0;
-  stroke: var(--border);
-  stroke-width: .6;
+  stroke: var(--text);
+  stroke-opacity: .75;
+  stroke-width: 2;
   stroke-linejoin: round;
   transition: fill-opacity .4s;
 }
