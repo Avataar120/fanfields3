@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-180500';
+  plugin_info.dateTimeVersion = '2026-10-04-181500';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -6198,39 +6198,27 @@ function wrapper(plugin_info) {
 
   // Keeps the Keys video dialog at the top of the screen, fully opaque so the map doesn't show
   // through the counts, and capped to the screen height with its content scrolling, so the
-  // review table that grows it never pushes it off the bottom.
+  // review table that grows it never pushes it off the bottom. Same flex technique as
+  // addTaskListShiftButtons: the cap has to be on the .ui-dialog itself (not just its content),
+  // since jQuery UI resizes the content pane to fit its own height option and ignores a
+  // max-height set there on its own.
   thisplugin.pinKeysVideoDialogToTop = function () {
     var $content = $('#dialog-plugin_fanfields3_keysvideo');
     if (!$content.length) return;
     var $ui = $content.closest('.ui-dialog');
-    $ui.css({ 'background': 'rgb(8, 48, 78)', 'opacity': 1 });
-    var chrome = $ui.outerHeight() - $content.outerHeight();
-    // Extra clearance on top of getMaxDialogHeight()'s own: on mobile, once the review table
-    // and its two bottom buttons (Cancel + Apply) are showing, this dialog still ran a bit
-    // taller than comfortable — other dialogs (Task List, ...) were fine with the shared
-    // height, so this stays local to the Keys video dialog rather than changing that shared
-    // function for everyone.
-    var extraMobileClearance = L.Browser.mobile ? 15 : 0;
-    var maxH = Math.max(100, thisplugin.getMaxDialogHeight() - chrome - extraMobileClearance);
+    $ui.css({
+      'background': 'rgb(8, 48, 78)',
+      'opacity': 1,
+      'max-height': thisplugin.getMaxDialogHeight() + 'px',
+      'display': 'flex',
+      'flex-direction': 'column'
+    });
     $content.css({
-      'max-height': maxH + 'px',
+      'flex': '1 1 auto',
       'overflow-y': 'auto'
     });
+    $ui.find('.ui-dialog-buttonpane').css('flex', '0 0 auto');
     $content.dialog('option', 'position', { my: 'top', at: 'top+10', of: window });
-
-    // TEMP DEBUG (remove once the mobile sizing issue is confirmed fixed): shows the raw numbers
-    // this function computed, directly in the dialog, since there's no devtools access on the
-    // phone where this bug reproduces.
-    var vh = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight;
-    $ui.find('> #plugin_fanfields3_keysvideo_dbg').remove();
-    $ui.append('<div id="plugin_fanfields3_keysvideo_dbg" style="position:absolute;bottom:2px;left:4px;' +
-      'font-size:10px;line-height:1.3;color:#ff0;background:#000;padding:2px 4px;z-index:9999;' +
-      'pointer-events:none;white-space:pre">' +
-      'vv=' + !!window.visualViewport + ' vh=' + Math.floor(vh) + ' ih=' + window.innerHeight +
-      ' mobile=' + L.Browser.mobile + '\n' +
-      'chrome=' + Math.floor(chrome) + ' maxH=' + maxH + ' uiH=' + Math.floor($ui.outerHeight()) +
-      ' uiTop=' + Math.floor($ui.offset().top) +
-      '</div>');
   };
 
   thisplugin.showKeysVideoReview = function (candidates, counts) {
