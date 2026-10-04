@@ -5368,16 +5368,21 @@ function wrapper(plugin_info) {
   // Throwing a link spends a key to its destination portal. Whenever indexOwnLinks() finds an
   // own-faction link that wasn't there the previous time (newKeys has it, thisplugin.ownLinkKeys
   // — the previous run's set — doesn't), that key is now spent: the Keys plugin's own count for
-  // that destination (destByKey) is decremented by 1, never below 0. Skipped on the very first
-  // run (thisplugin._ownLinksBaselineSet still false): with no previous set to compare against,
-  // every link already in-game would otherwise look "new" and get wrongly decremented. Only
-  // window.plugin.keys is touched — LiveInventory is a read-only reflection of the real
-  // inventory and has no such API (same restriction as thisplugin.toggleKeysPluginCount).
-  // Options dialog toggle ("Spend keys on throw"): on by default.
+  // that destination (destByKey) is decremented by 1, never below 0. Skipped while IITC is still
+  // loading map data (thisplugin._mapDataLoading): links stream in tile by tile after a reload,
+  // so an early, partial snapshot must never become the comparison baseline — every link already
+  // in-game that simply hasn't loaded yet would otherwise look "new" once it does, and get wrongly
+  // decremented. Also skipped on the first snapshot taken once loading is complete
+  // (thisplugin._ownLinksBaselineSet still false): with no previous full snapshot to compare
+  // against, every link already in-game would otherwise look "new" too. Only window.plugin.keys
+  // is touched — LiveInventory is a read-only reflection of the real inventory and has no such
+  // API (same restriction as thisplugin.toggleKeysPluginCount). Options dialog toggle ("Spend
+  // keys on throw"): on by default.
   thisplugin._ownLinksBaselineSet = false;
   thisplugin.consumeKeysOnLinkThrown = true;
 
   thisplugin.consumeKeysForNewLinks = function (newKeys, destByKey) {
+    if (thisplugin._mapDataLoading) return;
     if (!thisplugin._ownLinksBaselineSet) {
       thisplugin._ownLinksBaselineSet = true;
       return;
