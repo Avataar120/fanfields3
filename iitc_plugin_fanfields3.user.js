@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.1.0.20261004
+// @version         6.1.1.20261004
 // @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links, and route export to Google Maps / Portal Route. Enable from the layer chooser.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-152909';
+  plugin_info.dateTimeVersion = '2026-10-04-180500';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -33,6 +33,11 @@ function wrapper(plugin_info) {
 
   var arcname = (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'Arc' : '***';
   var changelog = [{
+      version: '6.1.1',
+      changes: [
+        'FIX: On mobile, the "Keys video" counts review window was still a bit too tall, with its Apply/Cancel buttons running under the phone\'s navigation bar.',
+      ],
+    },{
       version: '6.1.0',
       changes: [
         'IMPROVE: "Keys video" now reads a recording noticeably faster, by reading several frames at once instead of one at a time.',
@@ -6206,11 +6211,26 @@ function wrapper(plugin_info) {
     // height, so this stays local to the Keys video dialog rather than changing that shared
     // function for everyone.
     var extraMobileClearance = L.Browser.mobile ? 15 : 0;
+    var maxH = Math.max(100, thisplugin.getMaxDialogHeight() - chrome - extraMobileClearance);
     $content.css({
-      'max-height': Math.max(100, thisplugin.getMaxDialogHeight() - chrome - extraMobileClearance) + 'px',
+      'max-height': maxH + 'px',
       'overflow-y': 'auto'
     });
     $content.dialog('option', 'position', { my: 'top', at: 'top+10', of: window });
+
+    // TEMP DEBUG (remove once the mobile sizing issue is confirmed fixed): shows the raw numbers
+    // this function computed, directly in the dialog, since there's no devtools access on the
+    // phone where this bug reproduces.
+    var vh = (window.visualViewport && window.visualViewport.height) ? window.visualViewport.height : window.innerHeight;
+    $ui.find('> #plugin_fanfields3_keysvideo_dbg').remove();
+    $ui.append('<div id="plugin_fanfields3_keysvideo_dbg" style="position:absolute;bottom:2px;left:4px;' +
+      'font-size:10px;line-height:1.3;color:#ff0;background:#000;padding:2px 4px;z-index:9999;' +
+      'pointer-events:none;white-space:pre">' +
+      'vv=' + !!window.visualViewport + ' vh=' + Math.floor(vh) + ' ih=' + window.innerHeight +
+      ' mobile=' + L.Browser.mobile + '\n' +
+      'chrome=' + Math.floor(chrome) + ' maxH=' + maxH + ' uiH=' + Math.floor($ui.outerHeight()) +
+      ' uiTop=' + Math.floor($ui.offset().top) +
+      '</div>');
   };
 
   thisplugin.showKeysVideoReview = function (candidates, counts) {
