@@ -8788,15 +8788,8 @@ function wrapper(plugin_info) {
 
   thisplugin.showMainMenu = function (anchorEl) {
     var entries = [
-      { label: 'Options&hellip;', action: thisplugin.showOptionsDialog },
-      {
-        label: thisplugin.isPickingAnchor ? 'Pick&nbsp;anchor&nbsp;(click&nbsp;to&nbsp;cancel)' : 'Pick&nbsp;anchor',
-        action: thisplugin.toggleAnchorPicking
-      },
       { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
       { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
-      { label: 'Stats', action: thisplugin.showStatistics },
-      { label: 'Help', action: thisplugin.help },
       { label: 'Plan&nbsp;details', submenu: [
           { label: 'Print&nbsp;route', action: thisplugin.exportTaskListToPDF },
           { label: 'Print&nbsp;step&nbsp;by&nbsp;step&nbsp;plan', action: thisplugin.exportPlanPdf },
@@ -8806,7 +8799,11 @@ function wrapper(plugin_info) {
             }
           }
         ]
-      }
+      },
+      { label: 'Pick&nbsp;anchor', action: thisplugin.toggleAnchorPicking },
+      { label: 'Stats', action: thisplugin.showStatistics },
+      { label: 'Options', action: thisplugin.showOptionsDialog },
+      { label: 'Help', action: thisplugin.help }
     ];
 
     var rect = anchorEl.getBoundingClientRect();
