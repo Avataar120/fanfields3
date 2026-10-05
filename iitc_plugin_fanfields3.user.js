@@ -6638,7 +6638,7 @@ function wrapper(plugin_info) {
     var builtLinks = {};
     var formedFields = {};
 
-    order.forEach(function (srcFp) {
+    order.forEach(function (srcFp, visitIndex) {
       var srcUnder = thisplugin.isPointUnderAnyTriangle(srcFp.point, result.triangles);
       result.underAtVisit[srcFp.guid] = srcUnder;
 
@@ -6658,7 +6658,9 @@ function wrapper(plugin_info) {
           if (formedFields[field.id]) return;
           if (!field.links.every(function (k) { return builtLinks[k]; })) return;
           formedFields[field.id] = true;
-          result.triangles.push({ a: field.points[0], b: field.points[1], c: field.points[2] });
+          // visitIndex: which step of `order` completes this field -- unused by
+          // validateUnderFieldLinks (the other caller), only by exportPlanPdf's report.
+          result.triangles.push({ a: field.points[0], b: field.points[1], c: field.points[2], visitIndex: visitIndex });
           formedHere++;
         });
         result.fieldsByDirectedLink[dkey] = formedHere;
@@ -8755,7 +8757,8 @@ function wrapper(plugin_info) {
       { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
       { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
       { label: 'Stats', action: thisplugin.showStatistics },
-      { label: 'Help', action: thisplugin.help }
+      { label: 'Help', action: thisplugin.help },
+      { label: 'Export&nbsp;plan&nbsp;PDF', action: thisplugin.exportPlanPdf }
     ];
 
     var $menu = $('<div id="plugin_fanfields3_mainmenu" class="plugin_fanfields3_mainmenu"></div>');
@@ -8787,6 +8790,256 @@ function wrapper(plugin_info) {
     $(document).one('keydown.plugin_fanfields3_mainmenu', function (e) {
       if (e.key === 'Escape') $menu.remove();
     });
+  };
+
+  // Step-by-step PDF of the current plan: one page per portal in the walk, showing the links
+  // thrown there (with how many fields each completes) and a map of the plan so far (links/
+  // fields already done vs. done at this step). Mirrors test/tools/generateWalkReportPdf.py,
+  // used to validate "Less walking" during development, but reading live plan state directly
+  // instead of a fixture, so it always reflects exactly what's about to be walked.
+  // Step-by-step plan report: one printable page per portal in the walk (links thrown there,
+  // fields completed, a map of the plan so far). Built as plain HTML/SVG rather than a binary
+  // PDF generated in JS: IITC Mobile's WebView can't reliably hand a JS-generated binary blob
+  // back out (no real download support, and opening a blob: URL directly can crash the app
+  // outright), and its one JS->native bridge for saving files (window.saveFile) only ever
+  // writes plain text, not arbitrary bytes.
+  //
+  // Delivery differs by platform, since testing on IITC Mobile found neither of the two things
+  // this could otherwise lean on actually works there: window.print() does nothing (the app
+  // never wires a WebView's print output to Android's PrintManager, confirmed by its absence
+  // from the app's own source -- the existing "Print Task List" above likely never worked on
+  // mobile either, just never noticed), and window.open('', '_blank') plus writing into it
+  // produced no visible result either (likely silently blocked). window.saveFile is the one
+  // thing IITC Mobile actually implements for getting a file out of the WebView, so mobile gets
+  // the report as a plain .html file via that -- open it in a real mobile browser afterward to
+  // print it to PDF if wanted. Desktop keeps the print-dialog route, which is a real browser
+  // feature there.
+  thisplugin.exportPlanPdf = function () {
+    var order = thisplugin.getDisplayOrder();
+    if (!order || order.length < 2) {
+      alert('Fan Fields 3: no plan to export yet -- draw a polygon around some portals first.');
+      return;
+    }
+
+    var html = thisplugin.buildPlanPdfHtml(order);
+
+    if (window.saveFile) {
+      var mode = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) ? 'outbound' : 'inbound';
+      var anchorTitle = order[0].portal.options.data.title;
+      var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
+      window.saveFile(html, 'Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.html', 'text/html');
+      alert('Fan Fields 3: plan report saved as an HTML file. Open it in your phone\'s browser (not IITC) to view it or print it to PDF.');
+      return;
+    }
+
+    var w = window.open('', '_blank');
+    if (!w) return;
+
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+
+    w.focus();
+    setTimeout(function () { w.print(); }, 250);
+  };
+
+  // Escapes text dropped into the HTML built below (portal titles can contain '<', '&', etc.).
+  thisplugin.escapeHtml = function (s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  };
+
+  thisplugin.buildPlanPdfHtml = function (order) {
+    var walk = thisplugin.simulateWalk(order);
+
+    // Every portal's own lat/lng (for the map) and title (for the text panel), keyed the same
+    // way simulateWalk keys its own triangle points, so a field's three corners can be matched
+    // back to real portals without re-deriving anything simulateWalk already knows.
+    var infoByPointKey = {};
+    order.forEach(function (fp) {
+      var ll = fp.portal.getLatLng();
+      infoByPointKey[thisplugin.pointKey(fp.point)] = { guid: fp.guid, title: fp.portal.options.data.title, lat: ll.lat, lng: ll.lng };
+    });
+    function infoFor(point) { return infoByPointKey[thisplugin.pointKey(point)]; }
+
+    var linkSeq = []; // { srcInfo, dstInfo, stepIndex }
+    order.forEach(function (fp, stepIndex) {
+      (fp.outgoing || []).forEach(function (target) {
+        linkSeq.push({ srcInfo: infoFor(fp.point), dstInfo: infoFor(target.point), stepIndex: stepIndex });
+      });
+    });
+
+    var mode = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) ? 'outbound' : 'inbound';
+    var anchorTitle = order[0].portal.options.data.title;
+
+    var steps = order.map(function (fp, i) {
+      var prevFp = order[i - 1];
+      var distFromPrev = prevFp ? thisplugin.distanceTo(prevFp.point, fp.point) : 0;
+      var links = (fp.outgoing || []).map(function (target) {
+        var dkey = thisplugin.getDirectedLinkKey(fp.guid, target.guid);
+        return { title: target.portal.options.data.title, newFields: walk.fieldsByDirectedLink[dkey] || 0 };
+      });
+      return { info: infoFor(fp.point), distFromPrev: distFromPrev, links: links };
+    });
+    var cumulativeDist = 0;
+    steps.forEach(function (s) { cumulativeDist += s.distFromPrev; s.cumulativeDist = cumulativeDist; });
+
+    var runningLinks = 0, runningFields = 0;
+    var runningLinksAt = [], runningFieldsAt = [];
+    steps.forEach(function (s) {
+      runningLinks += s.links.length;
+      s.links.forEach(function (l) { runningFields += l.newFields; });
+      runningLinksAt.push(runningLinks);
+      runningFieldsAt.push(runningFields);
+    });
+
+    // Map bounds, in lat/lng, with an 8% margin -- same framing as the Python report.
+    var allLats = order.map(function (fp) { return infoFor(fp.point).lat; });
+    var allLngs = order.map(function (fp) { return infoFor(fp.point).lng; });
+    var minLat = Math.min.apply(null, allLats), maxLat = Math.max.apply(null, allLats);
+    var minLng = Math.min.apply(null, allLngs), maxLng = Math.max.apply(null, allLngs);
+    var latMargin = (maxLat - minLat) * 0.08 || 0.001;
+    var lngMargin = (maxLng - minLng) * 0.08 || 0.001;
+    minLat -= latMargin; maxLat += latMargin; minLng -= lngMargin; maxLng += lngMargin;
+
+    // SVG viewBox units for the map (arbitrary; scales to whatever size the CSS below gives it).
+    var mapSize = 1000;
+    var scale = Math.min(mapSize / (maxLng - minLng), mapSize / (maxLat - minLat));
+    var drawnW = (maxLng - minLng) * scale, drawnH = (maxLat - minLat) * scale;
+    var originX = (mapSize - drawnW) / 2, originY = (mapSize - drawnH) / 2;
+    function px(lng) { return originX + (lng - minLng) * scale; }
+    function py(lat) { return originY + (maxLat - lat) * scale; }
+
+    var esc = thisplugin.escapeHtml;
+
+    function buildMapSvg(i) {
+      var parts = [];
+      parts.push('<svg viewBox="0 0 ' + mapSize + ' ' + mapSize + '" class="ff3-map" preserveAspectRatio="xMidYMid meet">');
+
+      order.forEach(function (fp) {
+        var inf = infoFor(fp.point);
+        parts.push('<circle cx="' + px(inf.lng) + '" cy="' + py(inf.lat) + '" r="3" class="ff3-portal-dot"/>');
+      });
+
+      // Fields: completed-before-this-step ones first (light gray), this step's new ones on top
+      // (red) -- same two-layer draw order as the links below.
+      [false, true].forEach(function (onlyCurrent) {
+        walk.triangles.forEach(function (t) {
+          if (t.visitIndex > i) return;
+          if (onlyCurrent !== (t.visitIndex === i)) return;
+          var a = infoFor(t.a), b = infoFor(t.b), c = infoFor(t.c);
+          if (!a || !b || !c) return;
+          var points = [a, b, c].map(function (p) { return px(p.lng) + ',' + py(p.lat); }).join(' ');
+          parts.push('<polygon points="' + points + '" class="' + (onlyCurrent ? 'ff3-field-new' : 'ff3-field-done') + '"/>');
+        });
+      });
+
+      // Links: same already-done-first, this-step-on-top order.
+      [false, true].forEach(function (onlyCurrent) {
+        linkSeq.forEach(function (l) {
+          if (l.stepIndex > i) return;
+          if (onlyCurrent !== (l.stepIndex === i)) return;
+          parts.push('<line x1="' + px(l.srcInfo.lng) + '" y1="' + py(l.srcInfo.lat) + '" x2="' + px(l.dstInfo.lng) + '" y2="' + py(l.dstInfo.lat) +
+            '" class="' + (onlyCurrent ? 'ff3-link-new' : 'ff3-link-done') + '"/>');
+        });
+      });
+
+      // Walked path so far, then the current position on top.
+      if (i > 0) {
+        var pts = order.slice(0, i + 1).map(function (fp) {
+          var inf = infoFor(fp.point);
+          return px(inf.lng) + ',' + py(inf.lat);
+        }).join(' ');
+        parts.push('<polyline points="' + pts + '" class="ff3-walked-path"/>');
+      }
+      var curInfo = infoFor(order[i].point);
+      parts.push('<circle cx="' + px(curInfo.lng) + '" cy="' + py(curInfo.lat) + '" r="9" class="ff3-current-pos"/>');
+
+      parts.push('</svg>');
+      return parts.join('');
+    }
+
+    function buildTextPanel(i) {
+      var s = steps[i];
+      var lines = [];
+      lines.push('<div class="ff3-pdf-step-title">Step ' + (i + 1) + ' / ' + steps.length + '</div>');
+      lines.push('<div class="ff3-pdf-portal">Portal: ' + esc(s.info.title) + '</div>');
+      if (i > 0) lines.push('<div>From: ' + esc(steps[i - 1].info.title) + '</div>');
+      lines.push('<div>Distance walked this step: ' + Math.round(s.distFromPrev) + ' m</div>');
+      lines.push('<div>Cumulative distance walked: ' + Math.round(s.cumulativeDist) + ' m</div>');
+      if (s.links.length) {
+        lines.push('<div class="ff3-pdf-links-label">Links thrown here, in order:</div>');
+        lines.push('<ul class="ff3-pdf-links">');
+        s.links.forEach(function (l) {
+          var fieldTxt = l.newFields === 1 ? '1 field' : (l.newFields + ' fields');
+          lines.push('<li>&rarr; ' + esc(l.title) + ' (' + fieldTxt + ')</li>');
+        });
+        lines.push('</ul>');
+      } else {
+        lines.push('<div>No links thrown here.</div>');
+      }
+      lines.push('<div class="ff3-pdf-totals">Running totals: ' + runningLinksAt[i] + ' link(s), ' + runningFieldsAt[i] + ' field(s)</div>');
+      return lines.join('\n');
+    }
+
+    var legendHtml =
+      '<div class="ff3-pdf-legend">' +
+      '<div><span class="ff3-swatch-line" style="background:#333"></span>Links already thrown</div>' +
+      '<div><span class="ff3-swatch-line" style="background:#e60000"></span>New links (this step)</div>' +
+      '<div><span class="ff3-swatch-box" style="background:#d6d6d6"></span>Fields already formed</div>' +
+      '<div><span class="ff3-swatch-box" style="background:#ff9999"></span>New fields (this step)</div>' +
+      '<div><span class="ff3-swatch-line ff3-swatch-dashed" style="border-color:#1f6feb"></span>Walked path</div>' +
+      '</div>';
+
+    var pagesHtml = steps.map(function (_s, i) {
+      return (
+        '<section class="ff3-pdf-page">' +
+        '<h1>Fan Fields 3 — ' + esc(mode) + ' — anchor: ' + esc(anchorTitle) + ' — step ' + (i + 1) + '/' + steps.length + '</h1>' +
+        '<div class="ff3-pdf-body">' +
+        '<div class="ff3-pdf-map-col">' + buildMapSvg(i) + '</div>' +
+        '<div class="ff3-pdf-text-col">' + buildTextPanel(i) + legendHtml + '</div>' +
+        '</div>' +
+        '</section>'
+      );
+    }).join('\n');
+
+    var css = '\n' +
+      '@page { size: landscape; margin: 10mm; }\n' +
+      'body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; margin: 0; }\n' +
+      '.ff3-pdf-page { page-break-after: always; padding: 6mm; box-sizing: border-box; }\n' +
+      '.ff3-pdf-page:last-child { page-break-after: auto; }\n' +
+      'h1 { font-size: 12pt; text-align: center; margin: 0 0 6mm 0; }\n' +
+      '.ff3-pdf-body { display: flex; gap: 8mm; }\n' +
+      '.ff3-pdf-map-col { flex: 1.3; min-width: 0; }\n' +
+      '.ff3-map { width: 100%; height: auto; aspect-ratio: 1 / 1; }\n' +
+      '.ff3-portal-dot { fill: #999; }\n' +
+      '.ff3-field-done { fill: #d6d6d6; }\n' +
+      '.ff3-field-new { fill: #ff9999; }\n' +
+      '.ff3-link-done { stroke: #333; stroke-width: 2.5; }\n' +
+      '.ff3-link-new { stroke: #e60000; stroke-width: 5; }\n' +
+      '.ff3-walked-path { fill: none; stroke: #1f6feb; stroke-width: 2.5; stroke-dasharray: 8 6; opacity: 0.7; }\n' +
+      '.ff3-current-pos { fill: #1f6feb; stroke: #fff; stroke-width: 2.5; }\n' +
+      '.ff3-pdf-text-col { flex: 1; font-family: "Courier New", monospace; font-size: 9pt; }\n' +
+      '.ff3-pdf-step-title { font-size: 11pt; font-weight: bold; margin-bottom: 4mm; }\n' +
+      '.ff3-pdf-portal { margin-bottom: 4mm; }\n' +
+      '.ff3-pdf-links-label { margin-top: 4mm; }\n' +
+      '.ff3-pdf-links { margin: 1mm 0 4mm 0; padding-left: 4mm; list-style: none; }\n' +
+      '.ff3-pdf-totals { margin-top: 4mm; font-weight: bold; }\n' +
+      '.ff3-pdf-legend { margin-top: 8mm; font-family: Arial, sans-serif; font-size: 8pt; }\n' +
+      '.ff3-pdf-legend > div { display: flex; align-items: center; gap: 2mm; margin: 1mm 0; }\n' +
+      '.ff3-swatch-line { display: inline-block; width: 6mm; height: 0; border-top: 1mm solid; }\n' +
+      '.ff3-swatch-dashed { border-top-style: dashed; }\n' +
+      '.ff3-swatch-box { display: inline-block; width: 4mm; height: 3mm; }\n';
+
+    var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
+    return (
+      '<!doctype html>' +
+      '<html><head><meta charset="utf-8">' +
+      '<title>Fan Fields 3 - ' + esc(mode) + ' plan - ' + esc(safeAnchor) + '</title>' +
+      '<style>' + css + '</style>' +
+      '</head><body>' + pagesHtml + '</body></html>'
+    );
   };
 
   // Settings persisted across sessions via "Save options as default" in the Options dialog.
