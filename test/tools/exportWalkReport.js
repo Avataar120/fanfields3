@@ -90,15 +90,14 @@ function haversine(a, b) {
     return null;
   }
 
+  // Built first without newFields: the plugin's own per-portal outgoingMeta.fieldsCreatedValid
+  // is cumulative only within that one portal's own throw sequence, not a reliable global
+  // per-link count (it can even go backwards from one link to the next at the same portal) --
+  // newFields is filled in below from an independent, globally-consistent computation instead.
   const linkSeq = [];
   order.forEach((fp, stepIndex) => {
-    let prevCumulative = 0;
     (fp.outgoing || []).forEach((targetFp) => {
-      const meta = fp.outgoingMeta[targetFp.guid];
-      const cum = meta ? meta.fieldsCreatedValid : 0;
-      const newFields = cum - prevCumulative;
-      prevCumulative = cum;
-      linkSeq.push({ srcGuid: fp.guid, dstGuid: targetFp.guid, stepIndex, newFields });
+      linkSeq.push({ srcGuid: fp.guid, dstGuid: targetFp.guid, stepIndex, newFields: 0 });
     });
   });
 
@@ -107,13 +106,18 @@ function haversine(a, b) {
     .map((t) => [findGuidByPoint(t.a), findGuidByPoint(t.b), findGuidByPoint(t.c)])
     .filter((t) => t.every((g) => g));
 
-  const linkStepByEdge = {};
-  linkSeq.forEach((l) => { linkStepByEdge[edgeKey(l.srcGuid, l.dstGuid)] = l.stepIndex; });
+  // Index by edge, in overall throw order (not just stepIndex -- several links can share a
+  // step), so a triangle whose 3 edges are thrown across different steps, or even at the same
+  // step, is attributed to the one link that genuinely completes it last.
+  const linkIndexByEdge = {};
+  linkSeq.forEach((l, idx) => { linkIndexByEdge[edgeKey(l.srcGuid, l.dstGuid)] = idx; });
 
   const fieldCompletionStep = triangleGuids.map(([a, b, c]) => {
-    const edgeSteps = [edgeKey(a, b), edgeKey(b, c), edgeKey(a, c)].map((k) => linkStepByEdge[k]);
-    if (edgeSteps.some((s) => s === undefined)) return null;
-    return Math.max(...edgeSteps);
+    const edgeLinkIdx = [edgeKey(a, b), edgeKey(b, c), edgeKey(a, c)].map((k) => linkIndexByEdge[k]);
+    if (edgeLinkIdx.some((idx) => idx === undefined)) return null;
+    const completingLinkIdx = Math.max(...edgeLinkIdx);
+    linkSeq[completingLinkIdx].newFields += 1; // attribute this field to the link that completes it
+    return linkSeq[completingLinkIdx].stepIndex;
   });
 
   let cumulativeDist = 0;

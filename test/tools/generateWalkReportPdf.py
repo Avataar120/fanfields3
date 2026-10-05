@@ -29,7 +29,7 @@ steps = data['steps']
 link_seq = data['linkSeq']
 triangle_guids = data['triangleGuids']
 field_completion_step = data['fieldCompletionStep']
-title_suffix = f"{data.get('mode', '?')} — ancre : {data.get('anchorTitle', '?')}"
+title_suffix = f"{data.get('mode', '?')} — anchor: {data.get('anchorTitle', '?')}"
 
 all_lats = [p['lat'] for p in portals]
 all_lngs = [p['lng'] for p in portals]
@@ -76,31 +76,50 @@ def draw_map(ax, step_index):
     ax.scatter([cur['lng']], [cur['lat']], s=90, facecolor='#1f6feb', edgecolor='white', linewidth=1.2, zorder=6)
 
 
+# Running totals (links thrown, fields completed) through and including each step, computed once
+# up front so draw_text_panel can just look its step index up.
+running_links_total = []
+running_fields_total = []
+links_so_far = 0
+fields_so_far = 0
+for i in range(len(steps)):
+    links_so_far += len(steps[i]['links'])
+    fields_so_far += sum(l['newFields'] for l in steps[i]['links'])
+    running_links_total.append(links_so_far)
+    running_fields_total.append(fields_so_far)
+
+
 def draw_text_panel(ax, step_index):
     ax.axis('off')
     s = steps[step_index]
     lines = [
-        f"Étape {step_index + 1}/{len(steps)}",
+        f"Step {step_index + 1} / {len(steps)}",
         "",
-        f"Portail : {s['title']}",
-        f"Distance depuis le portail précédent : {s['distFromPrev']:.0f} m",
-        f"Distance totale parcourue : {s['cumulativeDist']:.0f} m",
+        f"Portal: {s['title']}",
         "",
     ]
+    if step_index > 0:
+        lines.append(f"From: {steps[step_index - 1]['title']}")
+    lines.append(f"Distance walked this step: {s['distFromPrev']:.0f} m")
+    lines.append(f"Cumulative distance walked: {s['cumulativeDist']:.0f} m")
+    lines.append("")
     if s['links']:
-        lines.append("Liens à tirer ici, dans l'ordre :")
-        for i, l in enumerate(s['links'], 1):
-            field_txt = {0: '0 field', 1: '1 field'}.get(l['newFields'], f"{l['newFields']} fields")
-            lines.append(f"  {i}. -> {l['destTitle']}  ({field_txt})")
+        lines.append("Links thrown here, in order:")
+        for l in s['links']:
+            field_txt = {0: '0 fields', 1: '1 field'}.get(l['newFields'], f"{l['newFields']} fields")
+            lines.append(f"  -> {l['destTitle']} ({field_txt})")
     else:
-        lines.append('Aucun lien à tirer ici.')
+        lines.append('No links thrown here.')
+    lines.append("")
+    lines.append(f"Running totals: {running_links_total[step_index]} link(s), "
+                  f"{running_fields_total[step_index]} field(s)")
 
     legend_elems = [
-        Line2D([0], [0], color='#333333', lw=1.5, label='Liens déjà tirés'),
-        Line2D([0], [0], color='#e60000', lw=2.5, label='Nouveaux liens (cette étape)'),
-        Line2D([0], [0], marker='s', color='none', markerfacecolor='#cccccc', markersize=10, label='Fields déjà formés'),
-        Line2D([0], [0], marker='s', color='none', markerfacecolor='#ff4d4d', markersize=10, label='Nouveaux fields (cette étape)'),
-        Line2D([0], [0], color='#1f6feb', lw=1.2, linestyle=(0, (3, 2)), label='Trajet à pied'),
+        Line2D([0], [0], color='#333333', lw=1.5, label='Links already thrown'),
+        Line2D([0], [0], color='#e60000', lw=2.5, label='New links (this step)'),
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='#cccccc', markersize=10, label='Fields already formed'),
+        Line2D([0], [0], marker='s', color='none', markerfacecolor='#ff4d4d', markersize=10, label='New fields (this step)'),
+        Line2D([0], [0], color='#1f6feb', lw=1.2, linestyle=(0, (3, 2)), label='Walked path'),
     ]
 
     ax.text(0.02, 0.98, '\n'.join(lines), transform=ax.transAxes, fontsize=10, va='top', ha='left', family='monospace')
@@ -112,7 +131,7 @@ with PdfPages(output_pdf) as pdf:
         fig, (ax_map, ax_text) = plt.subplots(1, 2, figsize=(11.5, 6.0), gridspec_kw={'width_ratios': [1.3, 1]})
         draw_map(ax_map, i)
         draw_text_panel(ax_text, i)
-        fig.suptitle(f"Fan Fields 3 — {title_suffix} — étape {i + 1}/{len(steps)}", fontsize=11)
+        fig.suptitle(f"Fan Fields 3 — {title_suffix} — step {i + 1}/{len(steps)}", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         pdf.savefig(fig)
         plt.close(fig)
