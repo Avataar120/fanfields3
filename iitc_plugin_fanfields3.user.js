@@ -6845,6 +6845,39 @@ function wrapper(plugin_info) {
     return { incomingCount: incomingCount, invalidCount: invalidCount };
   };
 
+  // Whether `edges` (srcGuid throws to dstGuid, same shape buildLinkOrderEdges/
+  // simulateDirectedPlan use) could ever be walked in a single pass at all: throwing a link
+  // needs the target's key already in hand, so the target must be visited before the source —
+  // if that requirement forms a cycle (A needs B's key, B needs C's, C needs A's), no walk order
+  // can satisfy every one of them simultaneously, regardless of which order is tried. The base
+  // plan the core algorithm builds never has this problem on its own (every mesh link points from
+  // the later-built portal to an earlier one, and the anchor's own fan links are the only
+  // exception, so a single consistent order always exists) — only an additional directed edge on
+  // top of that, such as a candidate mesh-link flip, can introduce one. Used to veto exactly that
+  // before it's accepted (see computeDistanceOrderFlips/computeKeysOrderFlips below).
+  thisplugin.hasPrecedenceCycle = function (edges) {
+    var dependents = {}; // guid -> guids that need ITS key before they can throw (visited after it)
+    edges.forEach(function (e) {
+      (dependents[e.dstGuid] = dependents[e.dstGuid] || []).push(e.srcGuid);
+    });
+
+    var state = {}; // 0/unset: unvisited, 1: on the current path, 2: fully resolved, no cycle through it
+    var cycleFound = false;
+
+    function visit(guid) {
+      if (cycleFound || state[guid] === 2) return;
+      if (state[guid] === 1) { cycleFound = true; return; }
+      state[guid] = 1;
+      (dependents[guid] || []).forEach(visit);
+      if (!cycleFound) state[guid] = 2;
+    }
+
+    Object.keys(dependents).forEach(function (guid) {
+      if (!cycleFound) visit(guid);
+    });
+    return cycleFound;
+  };
+
   // "Less walking": a portal whose own OUTGOING count is exactly 2 (its anchor link plus one
   // mesh link) is a candidate. Its mesh link flips to point AT it (mesh partner -> portal)
   // when visiting it between its own walk neighbors (whichever portals come right before and
@@ -6946,6 +6979,7 @@ function wrapper(plugin_info) {
       });
       var after = thisplugin.simulateDirectedPlan(trial);
       if (after.invalidCount > before.invalidCount) return; // required for feasibility, keep as-is
+      if (thisplugin.hasPrecedenceCycle(trial)) return; // would make no walk order satisfy every key dependency
 
       meshFlippedGuids[e.srcGuid] = true;
       e.srcGuid = desiredSrc;
@@ -7118,6 +7152,7 @@ function wrapper(plugin_info) {
         });
         var trialState = thisplugin.simulateDirectedPlan(trial);
         if (trialState.invalidCount > state.invalidCount) return; // never trade feasibility away
+        if (thisplugin.hasPrecedenceCycle(trial)) return; // would make no walk order satisfy every key dependency
 
         var trialMax = 0;
         Object.keys(trialState.incomingCount).forEach(function (guid) {
