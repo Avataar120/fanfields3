@@ -8787,7 +8787,15 @@ function wrapper(plugin_info) {
     }
 
     var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
-    doc.save('Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.pdf');
+    var filename = 'Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.pdf';
+
+    // doc.save() downloads via a hidden <a download> click, which a plain browser handles but
+    // which several WebViews -- IITC Mobile's included -- silently do nothing with (no error,
+    // no file). Opening the PDF itself in a new tab, the same way "Print Task List" above
+    // already does for its HTML, works in both: the browser either displays or downloads it,
+    // and a WebView routes it to whatever the OS has registered for PDFs.
+    var opened = window.open(doc.output('bloburl'), '_blank');
+    if (!opened) doc.save(filename); // popup blocked -- fall back to the direct download
   };
 
   // Settings persisted across sessions via "Save options as default" in the Options dialog.
