@@ -8798,19 +8798,30 @@ function wrapper(plugin_info) {
 
   // Gets a rendered PDF (see renderPlanPdf) out to the user. IITC Mobile (window.saveFile
   // present) has no way to open a URL on its own -- its one bridge for getting anything out of
-  // the WebView writes a named file via Android's own "save a document" picker, so the PDF is
-  // wrapped in a one-line auto-redirecting HTML page and saved as that: opening the saved file
-  // in a real browser afterward lands straight on the actual PDF, no manual steps beyond that.
-  // A desktop browser can simply navigate to the data: URI directly.
+  // the WebView writes a named file via Android's own "save a document" picker -- so the PDF is
+  // wrapped in a small HTML page and saved as that. That page embeds the PDF in an <iframe>
+  // (most mobile browsers render it inline, no click needed) and also offers it as a direct
+  // download link: a top-level *navigation* to a data: URI (what a meta-refresh or
+  // `location.href =` does) is exactly what modern browsers block as a phishing vector, but
+  // using one as a sub-resource (an <iframe>'s src, same as an <img>'s) isn't a navigation at
+  // all and isn't affected, and a user-clicked download link is an explicit save action, not a
+  // redirect -- neither hits that block. A desktop browser can just navigate to the data: URI
+  // directly, no such restriction there.
   thisplugin.deliverPlanPdf = function (pdf) {
     if (window.saveFile) {
-      var redirectHtml = '<!doctype html><html><head><meta charset="utf-8">' +
-        '<meta http-equiv="refresh" content="0; url=' + pdf.dataUri + '">' +
-        '<title>' + thisplugin.escapeHtml(pdf.filename) + '</title></head>' +
-        '<body>Opening the PDF&hellip; if nothing happens, ' +
-        '<a href="' + pdf.dataUri + '">tap here</a>.</body></html>';
-      window.saveFile(redirectHtml, pdf.filename.replace(/\.pdf$/, '.html'), 'text/html');
-      alert('Fan Fields 3: plan PDF saved. Open the saved file in your phone\'s browser (not IITC) -- it will open the PDF itself automatically.');
+      var esc = thisplugin.escapeHtml;
+      var page = '<!doctype html><html><head><meta charset="utf-8">' +
+        '<title>' + esc(pdf.filename) + '</title>' +
+        '<style>html,body{margin:0;height:100%}' +
+        '.ff3-pdf-dl{display:block;padding:10px;font:14px Arial,sans-serif;text-align:center;' +
+        'background:#1f6feb;color:#fff;text-decoration:none}' +
+        'iframe{width:100%;height:calc(100% - 40px);border:0}</style></head>' +
+        '<body>' +
+        '<a class="ff3-pdf-dl" href="' + pdf.dataUri + '" download="' + esc(pdf.filename) + '">Download ' + esc(pdf.filename) + '</a>' +
+        '<iframe src="' + pdf.dataUri + '"></iframe>' +
+        '</body></html>';
+      window.saveFile(page, pdf.filename.replace(/\.pdf$/, '.html'), 'text/html');
+      alert('Fan Fields 3: plan PDF saved. Open the saved file in your phone\'s browser (not IITC) to view or download it.');
       return;
     }
 
