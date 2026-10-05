@@ -37,7 +37,7 @@ function wrapper(plugin_info) {
       changes: [
         'NEW: Added a "Plan details" entry to the hamburger menu, gathering three ways to review or export the current plan -- "Print route" (the Task List, printable), "Print step by step plan" (one page per portal with the links to throw there, a running total of links/fields, and a map of progress so far, saved as a file you can open or print from your phone), and "Live simulation" (the planned walk previewed on the map, portal by portal). The separate Print and Walk sim buttons previously in the Task List moved here.',
         'IMPROVE: Live simulation (previously "Walk sim") always draws each portal\'s own links as it reaches them now, instead of that being a separate option to turn on.',
-        'FIX: The Statistics window\'s "Real activity" used to count every link and field your whole faction threw/formed, not just your own -- it now reads the faction Comm feed instead of the plan\'s own intel data, so it only counts what you personally did, limited to today (Comm history on Niantic\'s own servers doesn\'t reliably reach further back than that).',
+        'FIX: The Statistics window\'s "Real activity" used to count every link and field your whole faction threw/formed, not just your own -- it now reads the Faction and All Comm feeds instead of the plan\'s own intel data, so it only counts what you personally did, limited to today (Comm history on Niantic\'s own servers doesn\'t reliably reach further back than that).',
         'FIX: "Less walking" could flip a link\'s direction in a way that, combined with an earlier flip, made the plan impossible to walk in a single pass (a portal needing a key from another portal that itself needed one from the first) — such a flip is no longer made.',
         'FIX: In outbound mode, the Task List could keep showing a portal as "moved by Less walking" even after it had been placed back in its natural position by the GPS-based reordering ahead of the anchor.',
         'FIX: "Less walking" could relocate a portal to a spot that looked cheaper on paper but actually made the real walk longer; it now double-checks the actual cost after relocating and undoes any move that doesn\'t really pay off -- including when that move only looked justified because it was compared to the wrong spot.',
@@ -1468,7 +1468,7 @@ function wrapper(plugin_info) {
         '<i>Live&nbsp;simulation</i> previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached, with a running counter of links, fields and distance walked so far; tap the map to dismiss it.</p>' +
 
         '<p><b>Statistics</b><br>' +
-        'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Your&nbsp;activity&nbsp;today</i> section showing how many links and fields you personally have thrown/formed in-game today, read from the faction Comm feed — not from the plan — so you can compare your own progress against it. <i>Refresh</i> re-reads Comm; it only covers today, and however far back Comm history and your current map view actually reach. ' +
+        'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Your&nbsp;activity&nbsp;today</i> section showing how many links and fields you personally have thrown/formed in-game today, read from the Faction and All Comm feeds — not from the plan — so you can compare your own progress against it. <i>Refresh</i> re-reads Comm; it only covers today, and however far back Comm history and your current map view actually reach. If it cannot be read at all, the reason (e.g. an IITC build without a Comm module) is shown there. ' +
         'Switch its window (<i>Today</i>, <i>2&nbsp;days</i>, <i>7&nbsp;days</i>) to count further back; it refreshes on its own while the window stays open.</p>' +
 
         '<hr noshade>' +
@@ -1504,17 +1504,21 @@ function wrapper(plugin_info) {
   // only ever carry a TEAM, never an agent name, so this can't be computed from them (an
   // earlier version of this feature did, and ended up counting every teammate's activity too,
   // not just the player's own) — the only place IITC exposes WHO performed an action is the
-  // faction Comm feed, where a "linked"/"created a Control Field" message's PLAYER markup
-  // names the agent. See thisplugin.refreshMyActivityToday for how that's fetched.
+  // Comm feed, where a "linked"/"created a Control Field" message's PLAYER markup names the
+  // agent. Both the Faction and All channels are read (see thisplugin.refreshMyActivityToday):
+  // either one alone can be thin or empty for a given account/session (e.g. a channel the
+  // player's own client has never opened a tab for), while a link/field the player throws is
+  // reported on both, so reading both is what actually makes this reliable.
   //
   // Scoped to today (local midnight) only, and to whatever map area Comm currently requests
   // data for (IITC's own chat bounding box) — Niantic's own Comm history retention is short
   // (hours, not a guaranteed full day), so a longer window would often come back incomplete or
   // empty anyway; this already accepts that same-day risk rather than pretending to cover more.
+  thisplugin.MY_ACTIVITY_CHANNELS = ['faction', 'all'];
   thisplugin.MY_ACTIVITY_MAX_HISTORY_PAGES = 8;
   thisplugin.MY_ACTIVITY_PAGE_TIMEOUT_MS = 6000;
 
-  thisplugin.myActivityToday = { links: 0, fields: 0 };
+  thisplugin.myActivityToday = { links: 0, fields: 0, totalSeen: 0, ownSeen: 0 };
   thisplugin.myActivityState = 'idle'; // 'idle' | 'loading' | 'done' | 'error'
   thisplugin._myActivityRequestToken = 0;
 
@@ -1523,91 +1527,275 @@ function wrapper(plugin_info) {
     return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   };
 
-  // Tallies, among every faction Comm message gathered so far this refresh (processed: the
-  // same accumulated guid -> [time, auto, html, nick, parsedData] hash IITC's own comm.js
-  // hands to 'factionChatDataAvailable' listeners), how many were thrown/formed by the player
-  // themselves today. Also reports the oldest message's own time, so the caller knows whether
-  // paging back further could still reach anything newer than the cutoff.
+  // IITC fires a differently-named hook for the 'all' channel than the generic
+  // "<channel>ChatDataAvailable" pattern every other channel (including 'faction') uses — see
+  // IITC-CE's core/code/comm.js.
+  thisplugin.getCommHookName = function (channel) {
+    return (channel === 'all') ? 'publicChatDataAvailable' : (channel + 'ChatDataAvailable');
+  };
+
+  // Tallies, among every Comm message gathered so far this refresh (processed: the same
+  // accumulated guid -> [time, auto, html, nick, parsedData] hash IITC's own comm.js hands to
+  // its "<channel>ChatDataAvailable" listeners — see thisplugin.getCommHookName), how many were
+  // thrown/formed by the player themselves today. Also reports the oldest message's own time,
+  // so the caller knows whether paging back further could still reach anything newer than the
+  // cutoff. Channel-agnostic: the caller merges per-channel results before/after calling this.
+  //
+  // Whether to match a given message's author against our own name goes through THREE
+  // independent signals, any one of which is accepted: the tuple's own "nick" field (index 3 --
+  // what the Comm panel itself uses to highlight "your own" messages), parsedData.player.name
+  // (index 4's own internal field), and any PLAYER/SENDER markup entry's own plain text (the
+  // name actually printed in the message by parseMsgData, independent of both of the above).
+  // Different real IITC builds have been seen to leave one or two of these empty or wrong while
+  // the others stay correct, so relying on a single one keeps missing the player's own actions
+  // depending on which build is running -- accepting any match is what actually makes this
+  // robust across builds instead of chasing one build's quirk at a time.
+  thisplugin.getMessageAuthorCandidates = function (entry) {
+    var parsed = entry[4];
+    var candidates = [entry[3], parsed && parsed.player && parsed.player.name];
+    ((parsed && parsed.markup) || []).forEach(function (m) {
+      if ((m[0] === 'PLAYER' || m[0] === 'SENDER') && m[1] && m[1].plain) candidates.push(m[1].plain);
+    });
+    return candidates;
+  };
+
+  // Tallies, among every Comm message gathered so far this refresh (processed: the same
+  // accumulated guid -> [time, auto, html, nick, parsedData] hash IITC's own comm.js hands to
+  // its "<channel>ChatDataAvailable" listeners — see thisplugin.getCommHookName), how many were
+  // thrown/formed by the player themselves today. Also reports the oldest message's own time, so
+  // the caller knows whether paging back further could still reach anything newer than the
+  // cutoff, and how many messages were read in total vs. recognized as the player's own, so the
+  // Stats dialog can show that even when both counts land on zero (see buildRealActivityBodyHTML)
+  // -- the only way to tell "nothing to count" apart from "the matching itself failed" without
+  // opening a console. Channel-agnostic: the caller merges per-channel results before/after
+  // calling this.
+
+  // Plain, human-visible text of a rendered Comm message row's own HTML (entry[2] -- see
+  // getMessageAuthorCandidates for the processed tuple shape), with every tag (and the
+  // attributes on it -- onclick handlers, portal hrefs, …) dropped, leaving only what the
+  // chat panel actually displays. Used as a fallback text source below: some IITC builds (and
+  // some message types even on builds that usually do) carry the message's own narrative
+  // words -- "agent", "linked", "to", … -- baked into the rendering itself rather than as a
+  // plain 'TEXT' markup entry, so a message can visibly read "agent X linked A to B" while its
+  // own markup array has no 'TEXT' entry at all to find that in. Without this fallback, such a
+  // message's activity is silently missed -- recognized as the player's own (the author match
+  // doesn't depend on this), but never counted as a link/field.
+  thisplugin.stripHtmlToText = function (html) {
+    return String(html || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
   thisplugin.tallyMyActivity = function (processed) {
     var cutoff = thisplugin.getTodayCutoff();
     var ownName = window.PLAYER && window.PLAYER.nickname;
-    var result = { links: 0, fields: 0, oldestSeen: Infinity };
+    var result = { links: 0, fields: 0, oldestSeen: Infinity, totalSeen: 0, ownSeen: 0 };
     if (!ownName) return result;
+    var ownNameTrimmed = ownName.trim();
 
     Object.keys(processed).forEach(function (guid) {
-      var parsed = processed[guid][4];
-      if (!parsed || !parsed.player || parsed.player.name !== ownName) return;
-      if (parsed.time < result.oldestSeen) result.oldestSeen = parsed.time;
-      if (parsed.time < cutoff) return;
+      var entry = processed[guid];
+      if (!entry) return;
+      result.totalSeen++;
 
-      var text = (parsed.markup || []).map(function (m) { return m[0] === 'TEXT' ? m[1].plain : ''; }).join('');
+      var candidates = thisplugin.getMessageAuthorCandidates(entry);
+      var isOwn = candidates.some(function (name) {
+        return name && name.trim() === ownNameTrimmed;
+      });
+      if (!isOwn) return;
+      result.ownSeen++;
+
+      var time = entry[0];
+      if (time < result.oldestSeen) result.oldestSeen = time;
+      if (time < cutoff) return;
+
+      var parsed = entry[4];
+      var markup = parsed && parsed.markup;
+      // markup 'TEXT' entries first (cheap, exact), plus the rendered row's own HTML stripped
+      // to plain text as a fallback -- see stripHtmlToText for why the fallback is needed.
+      var text = (markup || []).map(function (m) { return m[0] === 'TEXT' ? m[1].plain : ''; }).join('') +
+        ' ' + thisplugin.stripHtmlToText(entry[2]);
+
       if (text.indexOf('destroyed') !== -1) return; // destroying something isn't "activity" for this count
       if (text.indexOf('created a Control Field') !== -1) { result.fields++; return; }
       if (text.indexOf('linked') !== -1) result.links++;
     });
+
     return result;
   };
 
-  // Fetches the faction Comm feed, paging back (IITC.comm.requestChannel's own getOlderMsgs)
-  // until either today's local midnight is reached, the server stops returning anything new
-  // (end of its own retention), or MY_ACTIVITY_MAX_HISTORY_PAGES is hit — then updates
-  // thisplugin.myActivityToday/State and, if the Stats dialog is open, its activity section.
+  // Fetches the Faction AND All Comm feeds (thisplugin.MY_ACTIVITY_CHANNELS), each paging back
+  // on its own (IITC.comm.requestChannel's own getOlderMsgs) until either today's local
+  // midnight is reached for that channel, the server stops returning anything new, or
+  // MY_ACTIVITY_MAX_HISTORY_PAGES is hit -- then merges both channels' messages (by guid, so an
+  // action reported on both never double-counts) and updates thisplugin.myActivityToday/State
+  // and, if the Stats dialog is open, its activity section.
+  // Which of refreshMyActivityToday's prerequisites was missing, in plain English -- shown
+  // directly in the Stats dialog (buildRealActivityBodyHTML) instead of only in the console, so
+  // a report of "Could not read Comm data" from the field actually says why.
+  thisplugin.diagnoseMyActivityUnavailable = function () {
+    if (!(window.PLAYER && window.PLAYER.nickname)) return 'your player info (nickname) is not loaded yet.';
+
+    var hasModernComm = !!(window.IITC && window.IITC.comm && typeof window.IITC.comm.requestChannel === 'function');
+    var hasLegacyChat = !!(window.chat && typeof window.chat.requestFaction === 'function');
+    if (hasModernComm || hasLegacyChat) return null;
+
+    // Neither of the two ways this plugin knows how to ask IITC for Comm data exists on this
+    // build -- dumped here (not just logged to the console, which mobile builds often have no
+    // way to open) so a report of this error already says exactly what's missing, without
+    // needing a follow-up round of guessing.
+    return 'this IITC build exposes neither window.IITC.comm.requestChannel nor window.chat.requestFaction (window.IITC: ' +
+      (window.IITC ? 'present' : 'missing') + ', window.chat: ' + (window.chat ? 'present' : 'missing') + ').';
+  };
+
+  // The function to call to request one page of a channel's Comm messages, preferring the
+  // long-standing window.chat.request*() entry points (chat.js) -- present across more IITC
+  // build vintages than the newer window.IITC.comm.requestChannel (comm.js) they both end up
+  // calling internally -- and falling back to that newer one directly when only it exists.
+  thisplugin.getCommRequestFn = function (channel) {
+    if (window.chat) {
+      if (channel === 'faction' && typeof window.chat.requestFaction === 'function') return window.chat.requestFaction;
+      if (channel === 'all' && typeof window.chat.requestPublic === 'function') return window.chat.requestPublic;
+    }
+    if (window.IITC && window.IITC.comm && typeof window.IITC.comm.requestChannel === 'function') {
+      return function (olderMsgs, isRetry) { return window.IITC.comm.requestChannel(channel, olderMsgs, isRetry); };
+    }
+    return null;
+  };
+
+  // IITC's own already-accumulated store for a channel (the exact same object its
+  // "<channel>ChatDataAvailable" hook hands listeners as `processed` -- see comm.js
+  // _handleChannel/_writeDataToHash), read directly rather than only ever through that hook.
+  // This matters because IITC.comm.requestChannel silently returns with NO hook firing at all
+  // whenever its own response carries nothing new to add on top of what it already has (see
+  // comm.js _handleChannel's own "no new data" shortcut) -- which is the common case, not a
+  // rare one: any time something else already caused this channel to be up to date (IITC's own
+  // background refresh of a visible chat tab, or an earlier page of this very fetch), our own
+  // request comes back empty and the hook stays silent, even though the channel's own store
+  // already holds everything we need, including activity from moments ago. Without reading the
+  // store directly, such a silent response was wrongly treated the same as "nothing to report",
+  // discarding everything the channel already knew.
+  //
+  // window.chat._public/_faction/_alerts (chat.js) are tried first, not window.IITC.comm's own
+  // _channelsData: modern chat.js keeps those three names only as "legacy compatibility"
+  // aliases pointing at the very same objects (`chat._public = IITC.comm._channelsData.all`),
+  // but an older IITC build that predates the IITC.comm/comm.js split never had
+  // window.IITC.comm._channelsData at all -- window.chat._public/_faction/_alerts (or
+  // equivalent) was the ONE real store in that era. Trying the chat.js names first means the
+  // exact same code path works whether this build still has window.IITC.comm or not, rather
+  // than silently reading nothing on an older build. Returns null when neither exists.
+  thisplugin.CHAT_LEGACY_CHANNEL_PROP = { all: '_public', faction: '_faction', alerts: '_alerts' };
+
+  thisplugin.getChannelLiveProcessedData = function (channel) {
+    var legacyProp = thisplugin.CHAT_LEGACY_CHANNEL_PROP[channel];
+    var legacyStore = legacyProp && window.chat && window.chat[legacyProp];
+    if (legacyStore && legacyStore.data) return legacyStore.data;
+
+    var channelsData = window.IITC && window.IITC.comm && window.IITC.comm._channelsData;
+    return (channelsData && channelsData[channel] && channelsData[channel].data) || null;
+  };
+
   thisplugin.refreshMyActivityToday = function () {
     thisplugin.myActivityState = 'loading';
     $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
 
-    if (!window.IITC || !window.IITC.comm || typeof window.IITC.comm.requestChannel !== 'function' ||
-      !(window.PLAYER && window.PLAYER.nickname)) {
+    var unavailableReason = thisplugin.diagnoseMyActivityUnavailable();
+    if (unavailableReason) {
       thisplugin.myActivityState = 'error';
+      thisplugin.myActivityErrorReason = unavailableReason;
       $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
       return;
     }
 
     var token = ++thisplugin._myActivityRequestToken;
     var cutoff = thisplugin.getTodayCutoff();
-    var pagesLeft = thisplugin.MY_ACTIVITY_MAX_HISTORY_PAGES;
-    var pageTimer = null;
+    var combinedProcessed = {};
+    var channelsPending = thisplugin.MY_ACTIVITY_CHANNELS.length;
 
-    function finish(tally) {
-      if (token !== thisplugin._myActivityRequestToken) return; // superseded by a newer refresh
-      clearTimeout(pageTimer);
-      window.removeHook('factionChatDataAvailable', onPage);
-      thisplugin.myActivityToday = { links: tally.links, fields: tally.fields };
+    function finishAllIfDone() {
+      if (token !== thisplugin._myActivityRequestToken) return;
+      if (channelsPending > 0) return;
+      var tally = thisplugin.tallyMyActivity(combinedProcessed);
+      thisplugin.myActivityToday = {
+        links: tally.links, fields: tally.fields, totalSeen: tally.totalSeen, ownSeen: tally.ownSeen
+      };
       thisplugin.myActivityState = 'done';
       $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
     }
 
-    function requestPage(olderMsgs) {
-      if (typeof window.idleReset === 'function') window.idleReset();
-      window.IITC.comm.requestChannel('faction', olderMsgs);
-      // No response at all (server error, or simply no older data left to send) never fires
-      // the hook below — this is what stops the pagination in that case instead of hanging.
-      pageTimer = setTimeout(function () { finish(thisplugin.tallyMyActivity({})); }, thisplugin.MY_ACTIVITY_PAGE_TIMEOUT_MS);
-    }
-
-    function onPage(data) {
-      if (token !== thisplugin._myActivityRequestToken) return;
-      clearTimeout(pageTimer);
-      var tally = thisplugin.tallyMyActivity(data.processed);
-      pagesLeft--;
-      if (tally.oldestSeen <= cutoff || pagesLeft <= 0) {
-        finish(tally);
-      } else {
-        requestPage(true);
+    thisplugin.MY_ACTIVITY_CHANNELS.forEach(function (channel) {
+      var requestFn = thisplugin.getCommRequestFn(channel);
+      if (!requestFn) {
+        channelsPending--;
+        finishAllIfDone();
+        return; // neither API available for this channel
       }
-    }
 
-    window.addHook('factionChatDataAvailable', onPage);
-    requestPage(false);
+      var hookName = thisplugin.getCommHookName(channel);
+      var pagesLeft = thisplugin.MY_ACTIVITY_MAX_HISTORY_PAGES;
+      var pageTimer = null;
+      var lastProcessed = {}; // kept across pages so a later page's timeout doesn't lose earlier ones
+
+      function finishChannel(processed) {
+        if (token !== thisplugin._myActivityRequestToken) return; // superseded by a newer refresh
+        clearTimeout(pageTimer);
+        window.removeHook(hookName, onPage);
+        Object.keys(processed).forEach(function (guid) {
+          combinedProcessed[guid] = processed[guid];
+        });
+        channelsPending--;
+        finishAllIfDone();
+      }
+
+      function requestPage(olderMsgs) {
+        if (typeof window.idleReset === 'function') window.idleReset();
+        requestFn(olderMsgs);
+        // No hook response at all -- a genuine server error, no older data left to send, OR
+        // (the common case) this request simply had nothing new to add on top of what
+        // IITC already has -- never fires the hook below. Falls back to IITC's own live store
+        // (see getChannelLiveProcessedData) rather than just `lastProcessed`, so a silent-
+        // because-nothing-new response still reports everything the channel already knows
+        // instead of looking like nothing was ever read.
+        pageTimer = setTimeout(function () {
+          var live = thisplugin.getChannelLiveProcessedData(channel);
+          finishChannel(live || lastProcessed);
+        }, thisplugin.MY_ACTIVITY_PAGE_TIMEOUT_MS);
+      }
+
+      function onPage(data) {
+        if (token !== thisplugin._myActivityRequestToken) return;
+        clearTimeout(pageTimer);
+        lastProcessed = data.processed;
+        var tally = thisplugin.tallyMyActivity(data.processed);
+        pagesLeft--;
+        if (tally.oldestSeen <= cutoff || pagesLeft <= 0) {
+          finishChannel(data.processed);
+        } else {
+          requestPage(true);
+        }
+      }
+
+      window.addHook(hookName, onPage);
+      requestPage(false);
+    });
   };
 
   thisplugin.buildRealActivityBodyHTML = function () {
     if (thisplugin.myActivityState === 'error') {
-      return '<p class="plugin_fanfields3_warn">Could not read Comm data (requires the Faction channel).</p>';
+      return '<p class="plugin_fanfields3_warn">Could not read Comm data' +
+        (thisplugin.myActivityErrorReason ? ': ' + thisplugin.myActivityErrorReason : '.') + '</p>';
     }
     if (thisplugin.myActivityState !== 'done') {
       return '<p class="plugin_fanfields3_italic">Loading…</p>';
     }
+
     return '<table><tr><td>Links thrown:</td><td>' + thisplugin.myActivityToday.links + '</td></tr>' +
       '<tr><td>Fields created:</td><td>' + thisplugin.myActivityToday.fields + '</td></tr></table>';
   };

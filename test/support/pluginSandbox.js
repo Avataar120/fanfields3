@@ -222,7 +222,40 @@ function createPluginSandbox() {
     fields: {},
     escapeHtmlSpecialChars(s) { return String(s); },
     formatDistance(d) { return d + ' m'; },
-    addHook() {},
+    // A real, minimal pub/sub (not a no-op): thisplugin.refreshMyActivityToday both registers
+    // and later removes its own per-channel listener, and a test needs to actually invoke a
+    // registered callback to simulate a Comm page arriving -- a no-op addHook couldn't support
+    // either. _hookListeners is also exposed directly so a test can fire a hook itself
+    // (window._hookListeners['factionChatDataAvailable'][0](data)) without IITC.comm actually
+    // being a real implementation.
+    _hookListeners: {},
+    addHook(name, cb) {
+      (sandboxWindow._hookListeners[name] = sandboxWindow._hookListeners[name] || []).push(cb);
+    },
+    removeHook(name, cb) {
+      const listeners = sandboxWindow._hookListeners[name];
+      if (!listeners) return;
+      const i = listeners.indexOf(cb);
+      if (i !== -1) listeners.splice(i, 1);
+    },
+    // Records every requestChannel call (channel, olderMsgs) so a test can assert which
+    // channels/pages were actually requested; it never calls back on its own -- a test fires
+    // the matching hook (see _hookListeners above) to simulate the server's response.
+    _commRequests: [],
+    IITC: {
+      comm: {
+        requestChannel(channel, olderMsgs) {
+          sandboxWindow._commRequests.push({ channel, olderMsgs });
+        },
+        // IITC.comm's own already-accumulated per-channel store (comm.js _channelsData) --
+        // real IITC keeps this current even when a request comes back with nothing new to add
+        // (no hook fires then; see comm.js _handleChannel), which is exactly the case
+        // thisplugin.getChannelLiveProcessedData reads this directly to cover. A test seeds
+        // `window.IITC.comm._channelsData[channel].data` to simulate "IITC already has this
+        // cached" independently of firing a channel's own hook.
+        _channelsData: { all: { data: {} }, faction: { data: {} }, alerts: { data: {} } }
+      }
+    },
     pluginCreateHook() {},
     runHooks() {},
     addLayerGroup() {},
