@@ -1,0 +1,8 @@
+{
+  "name": "fanfields3",
+  "private": true,
+  "description": "Fan Fields 3 - An INGRESS Fanfield planner plugin for IITC",
+  "scripts": {
+    "test": "node --test --test-force-exit \"test/*.test.js\""
+  }
+}
