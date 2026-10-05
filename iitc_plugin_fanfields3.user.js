@@ -8569,50 +8569,40 @@ function wrapper(plugin_info) {
   // fields already done vs. done at this step). Mirrors test/tools/generateWalkReportPdf.py,
   // used to validate "Less walking" during development, but reading live plan state directly
   // instead of a fixture, so it always reflects exactly what's about to be walked.
-  // jsPDF isn't bundled in this file (it's sizeable, and only ever needed if "Export plan PDF"
-  // is actually used) and can't be loaded via the userscript header's @require: that's a
-  // Tampermonkey/Greasemonkey convention, read by the desktop extension managing the script --
-  // IITC Mobile injects this same file directly, with no such preprocessing, so a @require
-  // there is silently never fetched at all. Loading it as a plain <script> the first time it's
-  // needed works identically in both.
-  thisplugin.JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
-  thisplugin._jsPdfLoadPromise = null;
-
-  thisplugin.ensureJsPdfLoaded = function () {
-    if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve();
-    if (thisplugin._jsPdfLoadPromise) return thisplugin._jsPdfLoadPromise;
-
-    thisplugin._jsPdfLoadPromise = new Promise(function (resolve, reject) {
-      var script = document.createElement('script');
-      script.src = thisplugin.JSPDF_URL;
-      script.onload = function () {
-        if (window.jspdf && window.jspdf.jsPDF) resolve();
-        else reject(new Error('loaded but window.jspdf.jsPDF is still missing'));
-      };
-      script.onerror = function () {
-        thisplugin._jsPdfLoadPromise = null; // let a later click retry instead of failing forever
-        reject(new Error('could not load the script'));
-      };
-      document.head.appendChild(script);
-    });
-    return thisplugin._jsPdfLoadPromise;
-  };
-
+  // Step-by-step plan report: one printable page per portal in the walk (links thrown there,
+  // fields completed, a map of the plan so far). Built as plain HTML/SVG and handed to the
+  // browser's own print dialog -- exactly how "Print Task List" above already turns its table
+  // into a PDF -- rather than generating a binary PDF in JS: IITC Mobile's WebView can't
+  // reliably hand a JS-generated binary blob back out (no real download support, and opening a
+  // blob: URL directly can crash the app outright), and its one JS->native bridge for saving
+  // files only ever writes plain text, not arbitrary bytes. A print-to-PDF has neither problem,
+  // and works the same in a desktop browser.
   thisplugin.exportPlanPdf = function () {
     var order = thisplugin.getDisplayOrder();
     if (!order || order.length < 2) {
       alert('Fan Fields 3: no plan to export yet -- draw a polygon around some portals first.');
       return;
     }
-    thisplugin.ensureJsPdfLoaded().then(function () {
-      thisplugin.renderPlanPdf(order);
-    }).catch(function (err) {
-      alert('Fan Fields 3: the PDF export library failed to load (jsPDF). Check your connection and try again.\n' + err.message);
+
+    var w = window.open('', '_blank');
+    if (!w) return;
+
+    w.document.open();
+    w.document.write(thisplugin.buildPlanPdfHtml(order));
+    w.document.close();
+
+    w.focus();
+    setTimeout(function () { w.print(); }, 250);
+  };
+
+  // Escapes text dropped into the HTML built below (portal titles can contain '<', '&', etc.).
+  thisplugin.escapeHtml = function (s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
     });
   };
 
-  // Does the actual rendering once jsPDF is confirmed loaded -- see exportPlanPdf above.
-  thisplugin.renderPlanPdf = function (order) {
+  thisplugin.buildPlanPdfHtml = function (order) {
     var walk = thisplugin.simulateWalk(order);
 
     // Every portal's own lat/lng (for the map) and title (for the text panel), keyed the same
@@ -8665,137 +8655,143 @@ function wrapper(plugin_info) {
     var lngMargin = (maxLng - minLng) * 0.08 || 0.001;
     minLat -= latMargin; maxLat += latMargin; minLng -= lngMargin; maxLng += lngMargin;
 
-    var pageW = 297; // A4 landscape, mm
-    var mapX = 10, mapY = 25, mapW = 165, mapH = 175;
-    var textX = 182;
-
-    var scale = Math.min(mapW / (maxLng - minLng), mapH / (maxLat - minLat));
+    // SVG viewBox units for the map (arbitrary; scales to whatever size the CSS below gives it).
+    var mapSize = 1000;
+    var scale = Math.min(mapSize / (maxLng - minLng), mapSize / (maxLat - minLat));
     var drawnW = (maxLng - minLng) * scale, drawnH = (maxLat - minLat) * scale;
-    var originX = mapX + (mapW - drawnW) / 2, originY = mapY + (mapH - drawnH) / 2;
+    var originX = (mapSize - drawnW) / 2, originY = (mapSize - drawnH) / 2;
     function px(lng) { return originX + (lng - minLng) * scale; }
     function py(lat) { return originY + (maxLat - lat) * scale; }
 
-    var doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    var esc = thisplugin.escapeHtml;
 
-    for (var i = 0; i < steps.length; i++) {
-      if (i > 0) doc.addPage();
+    function buildMapSvg(i) {
+      var parts = [];
+      parts.push('<svg viewBox="0 0 ' + mapSize + ' ' + mapSize + '" class="ff3-map" preserveAspectRatio="xMidYMid meet">');
 
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(12);
-      doc.text('Fan Fields 3 — ' + mode + ' — anchor: ' + anchorTitle + ' — step ' + (i + 1) + '/' + steps.length,
-        pageW / 2, 14, { align: 'center' });
-
-      // All portals, as small gray dots.
-      doc.setFillColor(153, 153, 153);
       order.forEach(function (fp) {
         var inf = infoFor(fp.point);
-        doc.circle(px(inf.lng), py(inf.lat), 0.5, 'F');
+        parts.push('<circle cx="' + px(inf.lng) + '" cy="' + py(inf.lat) + '" r="3" class="ff3-portal-dot"/>');
       });
 
       // Fields: completed-before-this-step ones first (light gray), this step's new ones on top
-      // (red) -- same two-layer draw order as the map's links below.
+      // (red) -- same two-layer draw order as the links below.
       [false, true].forEach(function (onlyCurrent) {
         walk.triangles.forEach(function (t) {
           if (t.visitIndex > i) return;
           if (onlyCurrent !== (t.visitIndex === i)) return;
           var a = infoFor(t.a), b = infoFor(t.b), c = infoFor(t.c);
           if (!a || !b || !c) return;
-          doc.setFillColor.apply(doc, onlyCurrent ? [255, 153, 153] : [214, 214, 214]);
-          doc.triangle(px(a.lng), py(a.lat), px(b.lng), py(b.lat), px(c.lng), py(c.lat), 'F');
+          var points = [a, b, c].map(function (p) { return px(p.lng) + ',' + py(p.lat); }).join(' ');
+          parts.push('<polygon points="' + points + '" class="' + (onlyCurrent ? 'ff3-field-new' : 'ff3-field-done') + '"/>');
         });
       });
 
-      // Links: same already-done-first, this-step-on-top order, black vs. red.
+      // Links: same already-done-first, this-step-on-top order.
       [false, true].forEach(function (onlyCurrent) {
         linkSeq.forEach(function (l) {
           if (l.stepIndex > i) return;
           if (onlyCurrent !== (l.stepIndex === i)) return;
-          doc.setDrawColor.apply(doc, onlyCurrent ? [230, 0, 0] : [51, 51, 51]);
-          doc.setLineWidth(onlyCurrent ? 0.6 : 0.25);
-          doc.line(px(l.srcInfo.lng), py(l.srcInfo.lat), px(l.dstInfo.lng), py(l.dstInfo.lat));
+          parts.push('<line x1="' + px(l.srcInfo.lng) + '" y1="' + py(l.srcInfo.lat) + '" x2="' + px(l.dstInfo.lng) + '" y2="' + py(l.dstInfo.lat) +
+            '" class="' + (onlyCurrent ? 'ff3-link-new' : 'ff3-link-done') + '"/>');
         });
       });
 
-      // Walked path so far, dashed blue, then the current position on top.
-      doc.setDrawColor(31, 111, 235);
-      doc.setLineWidth(0.3);
-      doc.setLineDashPattern([0.8, 0.6], 0);
-      for (var w = 0; w < i; w++) {
-        var p0 = infoFor(order[w].point), p1 = infoFor(order[w + 1].point);
-        doc.line(px(p0.lng), py(p0.lat), px(p1.lng), py(p1.lat));
+      // Walked path so far, then the current position on top.
+      if (i > 0) {
+        var pts = order.slice(0, i + 1).map(function (fp) {
+          var inf = infoFor(fp.point);
+          return px(inf.lng) + ',' + py(inf.lat);
+        }).join(' ');
+        parts.push('<polyline points="' + pts + '" class="ff3-walked-path"/>');
       }
-      doc.setLineDashPattern([], 0);
-
       var curInfo = infoFor(order[i].point);
-      doc.setFillColor(31, 111, 235);
-      doc.circle(px(curInfo.lng), py(curInfo.lat), 1.3, 'F');
-      doc.setDrawColor(255, 255, 255);
-      doc.setLineWidth(0.3);
-      doc.circle(px(curInfo.lng), py(curInfo.lat), 1.3, 'D');
+      parts.push('<circle cx="' + px(curInfo.lng) + '" cy="' + py(curInfo.lat) + '" r="9" class="ff3-current-pos"/>');
 
-      // Text panel.
-      doc.setFont('courier', 'normal');
-      doc.setFontSize(9);
-      var y = 25;
-      var lineH = 4.3;
-      function line(text) { doc.text(text, textX, y); y += lineH; }
-
-      line('Step ' + (i + 1) + ' / ' + steps.length);
-      y += lineH;
-      line('Portal: ' + steps[i].info.title);
-      y += lineH;
-      if (i > 0) line('From: ' + steps[i - 1].info.title);
-      line('Distance walked this step: ' + Math.round(steps[i].distFromPrev) + ' m');
-      line('Cumulative distance walked: ' + Math.round(steps[i].cumulativeDist) + ' m');
-      y += lineH;
-      if (steps[i].links.length) {
-        line('Links thrown here, in order:');
-        steps[i].links.forEach(function (l) {
-          var fieldTxt = l.newFields === 1 ? '1 field' : (l.newFields + ' fields');
-          line('  -> ' + l.title + ' (' + fieldTxt + ')');
-        });
-      } else {
-        line('No links thrown here.');
-      }
-      y += lineH;
-      line('Running totals: ' + runningLinksAt[i] + ' link(s), ' + runningFieldsAt[i] + ' field(s)');
-
-      // Legend.
-      var legendY = mapY + mapH + 4;
-      var legendItems = [
-        [[51, 51, 51], 'line', 'Links already thrown'],
-        [[230, 0, 0], 'line', 'New links (this step)'],
-        [[214, 214, 214], 'box', 'Fields already formed'],
-        [[255, 153, 153], 'box', 'New fields (this step)'],
-        [[31, 111, 235], 'line', 'Walked path']
-      ];
-      doc.setFontSize(8);
-      legendItems.forEach(function (item) {
-        var color = item[0], kind = item[1], label = item[2];
-        if (kind === 'line') {
-          doc.setDrawColor.apply(doc, color);
-          doc.setLineWidth(0.6);
-          doc.line(textX, legendY - 1, textX + 6, legendY - 1);
-        } else {
-          doc.setFillColor.apply(doc, color);
-          doc.rect(textX, legendY - 2.2, 4, 2.8, 'F');
-        }
-        doc.setFont('helvetica', 'normal');
-        doc.text(label, textX + 9, legendY);
-        legendY += 4.5;
-      });
+      parts.push('</svg>');
+      return parts.join('');
     }
 
-    var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
-    var filename = 'Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.pdf';
+    function buildTextPanel(i) {
+      var s = steps[i];
+      var lines = [];
+      lines.push('<div class="ff3-pdf-step-title">Step ' + (i + 1) + ' / ' + steps.length + '</div>');
+      lines.push('<div class="ff3-pdf-portal">Portal: ' + esc(s.info.title) + '</div>');
+      if (i > 0) lines.push('<div>From: ' + esc(steps[i - 1].info.title) + '</div>');
+      lines.push('<div>Distance walked this step: ' + Math.round(s.distFromPrev) + ' m</div>');
+      lines.push('<div>Cumulative distance walked: ' + Math.round(s.cumulativeDist) + ' m</div>');
+      if (s.links.length) {
+        lines.push('<div class="ff3-pdf-links-label">Links thrown here, in order:</div>');
+        lines.push('<ul class="ff3-pdf-links">');
+        s.links.forEach(function (l) {
+          var fieldTxt = l.newFields === 1 ? '1 field' : (l.newFields + ' fields');
+          lines.push('<li>&rarr; ' + esc(l.title) + ' (' + fieldTxt + ')</li>');
+        });
+        lines.push('</ul>');
+      } else {
+        lines.push('<div>No links thrown here.</div>');
+      }
+      lines.push('<div class="ff3-pdf-totals">Running totals: ' + runningLinksAt[i] + ' link(s), ' + runningFieldsAt[i] + ' field(s)</div>');
+      return lines.join('\n');
+    }
 
-    // doc.save() downloads via a hidden <a download> click, which a plain browser handles but
-    // which several WebViews -- IITC Mobile's included -- silently do nothing with (no error,
-    // no file). Opening the PDF itself in a new tab, the same way "Print Task List" above
-    // already does for its HTML, works in both: the browser either displays or downloads it,
-    // and a WebView routes it to whatever the OS has registered for PDFs.
-    var opened = window.open(doc.output('bloburl'), '_blank');
-    if (!opened) doc.save(filename); // popup blocked -- fall back to the direct download
+    var legendHtml =
+      '<div class="ff3-pdf-legend">' +
+      '<div><span class="ff3-swatch-line" style="background:#333"></span>Links already thrown</div>' +
+      '<div><span class="ff3-swatch-line" style="background:#e60000"></span>New links (this step)</div>' +
+      '<div><span class="ff3-swatch-box" style="background:#d6d6d6"></span>Fields already formed</div>' +
+      '<div><span class="ff3-swatch-box" style="background:#ff9999"></span>New fields (this step)</div>' +
+      '<div><span class="ff3-swatch-line ff3-swatch-dashed" style="border-color:#1f6feb"></span>Walked path</div>' +
+      '</div>';
+
+    var pagesHtml = steps.map(function (_s, i) {
+      return (
+        '<section class="ff3-pdf-page">' +
+        '<h1>Fan Fields 3 — ' + esc(mode) + ' — anchor: ' + esc(anchorTitle) + ' — step ' + (i + 1) + '/' + steps.length + '</h1>' +
+        '<div class="ff3-pdf-body">' +
+        '<div class="ff3-pdf-map-col">' + buildMapSvg(i) + '</div>' +
+        '<div class="ff3-pdf-text-col">' + buildTextPanel(i) + legendHtml + '</div>' +
+        '</div>' +
+        '</section>'
+      );
+    }).join('\n');
+
+    var css = '\n' +
+      '@page { size: landscape; margin: 10mm; }\n' +
+      'body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; margin: 0; }\n' +
+      '.ff3-pdf-page { page-break-after: always; padding: 6mm; box-sizing: border-box; }\n' +
+      '.ff3-pdf-page:last-child { page-break-after: auto; }\n' +
+      'h1 { font-size: 12pt; text-align: center; margin: 0 0 6mm 0; }\n' +
+      '.ff3-pdf-body { display: flex; gap: 8mm; }\n' +
+      '.ff3-pdf-map-col { flex: 1.3; min-width: 0; }\n' +
+      '.ff3-map { width: 100%; height: auto; aspect-ratio: 1 / 1; }\n' +
+      '.ff3-portal-dot { fill: #999; }\n' +
+      '.ff3-field-done { fill: #d6d6d6; }\n' +
+      '.ff3-field-new { fill: #ff9999; }\n' +
+      '.ff3-link-done { stroke: #333; stroke-width: 2.5; }\n' +
+      '.ff3-link-new { stroke: #e60000; stroke-width: 5; }\n' +
+      '.ff3-walked-path { fill: none; stroke: #1f6feb; stroke-width: 2.5; stroke-dasharray: 8 6; opacity: 0.7; }\n' +
+      '.ff3-current-pos { fill: #1f6feb; stroke: #fff; stroke-width: 2.5; }\n' +
+      '.ff3-pdf-text-col { flex: 1; font-family: "Courier New", monospace; font-size: 9pt; }\n' +
+      '.ff3-pdf-step-title { font-size: 11pt; font-weight: bold; margin-bottom: 4mm; }\n' +
+      '.ff3-pdf-portal { margin-bottom: 4mm; }\n' +
+      '.ff3-pdf-links-label { margin-top: 4mm; }\n' +
+      '.ff3-pdf-links { margin: 1mm 0 4mm 0; padding-left: 4mm; list-style: none; }\n' +
+      '.ff3-pdf-totals { margin-top: 4mm; font-weight: bold; }\n' +
+      '.ff3-pdf-legend { margin-top: 8mm; font-family: Arial, sans-serif; font-size: 8pt; }\n' +
+      '.ff3-pdf-legend > div { display: flex; align-items: center; gap: 2mm; margin: 1mm 0; }\n' +
+      '.ff3-swatch-line { display: inline-block; width: 6mm; height: 0; border-top: 1mm solid; }\n' +
+      '.ff3-swatch-dashed { border-top-style: dashed; }\n' +
+      '.ff3-swatch-box { display: inline-block; width: 4mm; height: 3mm; }\n';
+
+    var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
+    return (
+      '<!doctype html>' +
+      '<html><head><meta charset="utf-8">' +
+      '<title>Fan Fields 3 - ' + esc(mode) + ' plan - ' + esc(safeAnchor) + '</title>' +
+      '<style>' + css + '</style>' +
+      '</head><body>' + pagesHtml + '</body></html>'
+    );
   };
 
   // Settings persisted across sessions via "Save options as default" in the Options dialog.
