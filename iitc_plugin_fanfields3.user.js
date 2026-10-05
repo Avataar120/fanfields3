@@ -7168,6 +7168,13 @@ function wrapper(plugin_info) {
         if (!paidOff && !gapIsBetter) { toRevert.push(guid); return; }
         if (!gapIsBetter) return; // already as good as it gets here, nothing more to try
 
+        // For a candidate that hasn't paid off yet, chasing this gap is only worth it if it
+        // actually beats the ORIGINAL detour cost the candidate was trying to avoid in the
+        // first place -- merely being cheaper than its own (already losing) current spot isn't
+        // enough, or a flip could be kept even though the candidate still nets worse overall
+        // than leaving it at its original build-order position.
+        if (!paidOff && gap.cost > savingsByGuid[guid] + 1e-6) { toRevert.push(guid); return; }
+
         var withoutGuid = reorderResult.order.filter(function (g) { return g !== guid; });
         var blockingSourceGuids = (buildIncomingSourcesByGuid(current)[guid] || []).filter(function (srcGuid) {
           return withoutGuid.indexOf(srcGuid) <= gap.afterIdx;
