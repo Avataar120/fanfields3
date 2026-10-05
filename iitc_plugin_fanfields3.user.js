@@ -8570,13 +8570,22 @@ function wrapper(plugin_info) {
   // used to validate "Less walking" during development, but reading live plan state directly
   // instead of a fixture, so it always reflects exactly what's about to be walked.
   // Step-by-step plan report: one printable page per portal in the walk (links thrown there,
-  // fields completed, a map of the plan so far). Built as plain HTML/SVG and handed to the
-  // browser's own print dialog -- exactly how "Print Task List" above already turns its table
-  // into a PDF -- rather than generating a binary PDF in JS: IITC Mobile's WebView can't
-  // reliably hand a JS-generated binary blob back out (no real download support, and opening a
-  // blob: URL directly can crash the app outright), and its one JS->native bridge for saving
-  // files only ever writes plain text, not arbitrary bytes. A print-to-PDF has neither problem,
-  // and works the same in a desktop browser.
+  // fields completed, a map of the plan so far). Built as plain HTML/SVG rather than a binary
+  // PDF generated in JS: IITC Mobile's WebView can't reliably hand a JS-generated binary blob
+  // back out (no real download support, and opening a blob: URL directly can crash the app
+  // outright), and its one JS->native bridge for saving files (window.saveFile) only ever
+  // writes plain text, not arbitrary bytes.
+  //
+  // Delivery differs by platform, since testing on IITC Mobile found neither of the two things
+  // this could otherwise lean on actually works there: window.print() does nothing (the app
+  // never wires a WebView's print output to Android's PrintManager, confirmed by its absence
+  // from the app's own source -- the existing "Print Task List" above likely never worked on
+  // mobile either, just never noticed), and window.open('', '_blank') plus writing into it
+  // produced no visible result either (likely silently blocked). window.saveFile is the one
+  // thing IITC Mobile actually implements for getting a file out of the WebView, so mobile gets
+  // the report as a plain .html file via that -- open it in a real mobile browser afterward to
+  // print it to PDF if wanted. Desktop keeps the print-dialog route, which is a real browser
+  // feature there.
   thisplugin.exportPlanPdf = function () {
     var order = thisplugin.getDisplayOrder();
     if (!order || order.length < 2) {
@@ -8584,11 +8593,22 @@ function wrapper(plugin_info) {
       return;
     }
 
+    var html = thisplugin.buildPlanPdfHtml(order);
+
+    if (window.saveFile) {
+      var mode = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) ? 'outbound' : 'inbound';
+      var anchorTitle = order[0].portal.options.data.title;
+      var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
+      window.saveFile(html, 'Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.html', 'text/html');
+      alert('Fan Fields 3: plan report saved as an HTML file. Open it in your phone\'s browser (not IITC) to view it or print it to PDF.');
+      return;
+    }
+
     var w = window.open('', '_blank');
     if (!w) return;
 
     w.document.open();
-    w.document.write(thisplugin.buildPlanPdfHtml(order));
+    w.document.write(html);
     w.document.close();
 
     w.focus();
