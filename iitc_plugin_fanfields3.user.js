@@ -7073,11 +7073,80 @@ function wrapper(plugin_info) {
       return 0;
     }
 
+    // The cheapest gap for `guid` in `orderGuids` if its own incoming-link precedence didn't
+    // bound where it may land at all — together with exactly which of its incoming sources
+    // (if any) are positioned early enough to rule that gap out. Mirrors
+    // computeDistanceOrderReordering's own gap search, minus the `limit` it applies.
+    function cheapestUnconstrainedGap(orderGuids, guid) {
+      var withoutGuid = orderGuids.filter(function (g) { return g !== guid; });
+      var best = null;
+      for (var i = 0; i < withoutGuid.length - 1; i++) {
+        var a = withoutGuid[i], b = withoutGuid[i + 1];
+        var cost = dist(a, guid) + dist(guid, b) - dist(a, b);
+        if (!best || cost < best.cost - 1e-9) best = { afterGuid: a, afterIdx: i, cost: cost };
+      }
+      if (withoutGuid.length) {
+        var endCost = dist(withoutGuid[withoutGuid.length - 1], guid);
+        if (!best || endCost < best.cost - 1e-9) {
+          best = { afterGuid: withoutGuid[withoutGuid.length - 1], afterIdx: withoutGuid.length - 1, cost: endCost };
+        }
+      }
+      return best;
+    }
+
     var reorderResult = buildReorder(meshFlippedGuids);
 
     if (reorderResult) {
-      var toRevert = Object.keys(reorderResult.movedGuids).filter(function (guid) {
-        return insertionCost(reorderResult.order, guid) > savingsByGuid[guid] + 1e-6;
+      var toRevert = [];
+
+      Object.keys(reorderResult.movedGuids).forEach(function (guid) {
+        var ownCost = insertionCost(reorderResult.order, guid);
+        var paidOff = ownCost <= savingsByGuid[guid] + 1e-6;
+
+        // Besides checking whether the actual landing spot paid off at all, also look for a
+        // strictly cheaper gap elsewhere in the walk — the trigger decision above only ever
+        // compared a candidate against its own two immediate build-order neighbors, never
+        // against every other gap in the walk, so a genuinely better slot can exist even for a
+        // candidate that already "paid off" where it landed. Reaching it may only be blocked by
+        // one or more of its own incoming links (whoever throws a link at it needs it captured
+        // first) — the one thing a flip, not a revert, can actually fix.
+        var gap = cheapestUnconstrainedGap(reorderResult.order, guid);
+        var gapIsBetter = gap && gap.cost < ownCost - 1e-6;
+
+        if (!paidOff && !gapIsBetter) { toRevert.push(guid); return; }
+        if (!gapIsBetter) return; // already as good as it gets here, nothing more to try
+
+        var withoutGuid = reorderResult.order.filter(function (g) { return g !== guid; });
+        var blockingSourceGuids = (buildIncomingSourcesByGuid(current)[guid] || []).filter(function (srcGuid) {
+          return withoutGuid.indexOf(srcGuid) <= gap.afterIdx;
+        });
+        if (!blockingSourceGuids.length) {
+          if (!paidOff) toRevert.push(guid); // not actually a precedence problem, and didn't pay off either
+          return;
+        }
+
+        var trial = current;
+        var flippable = blockingSourceGuids.every(function (srcGuid) {
+          var edge = trial.filter(function (e) { return e.srcGuid === srcGuid && e.dstGuid === guid; })[0];
+          if (!edge) return false; // not a direct edge (e.g. same pair flipped already) -- bail, don't guess
+          trial = trial.map(function (e) {
+            return e === edge ? $.extend({}, e, { srcGuid: guid, dstGuid: srcGuid }) : e;
+          });
+          return true;
+        });
+        if (!flippable) { if (!paidOff) toRevert.push(guid); return; }
+
+        var beforeFlip = thisplugin.simulateDirectedPlan(current);
+        var afterFlip = thisplugin.simulateDirectedPlan(trial);
+        if (afterFlip.invalidCount > beforeFlip.invalidCount || thisplugin.hasPrecedenceCycle(trial)) {
+          if (!paidOff) toRevert.push(guid);
+          return;
+        }
+
+        // Safe and strictly better: adopt the flipped edge(s) so the next reorder can actually
+        // reach that cheaper gap, whether or not the candidate's current spot already paid off
+        // on its own.
+        current = trial;
       });
 
       if (toRevert.length) {
@@ -7088,8 +7157,11 @@ function wrapper(plugin_info) {
           var edge = current.filter(function (e) { return e.key === edgeKey; })[0];
           if (edge) { var tmp = edge.srcGuid; edge.srcGuid = edge.dstGuid; edge.dstGuid = tmp; }
         });
-        reorderResult = buildReorder(meshFlippedGuids);
       }
+      // Either some guids were reverted, or an incoming edge was flipped to free up a cheaper
+      // gap for one that wasn't — either way the walk order has to be rebuilt once more to
+      // reflect it.
+      reorderResult = buildReorder(meshFlippedGuids);
     }
 
     var flips = thisplugin.flipsFromDirections(current, naturalByKey);
