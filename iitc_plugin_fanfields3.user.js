@@ -15,6 +15,7 @@
 // @homepageURL     https://github.com/Avataar120/fanfields3/
 // @depends         draw-tools@breunigs
 // @recommends      bookmarks@ZasoGD|draw-tools-plus@zaso|liveInventory@DanielOnDiordna|keys@xelio
+// @require         https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @preview         https://raw.githubusercontent.com/Avataar120/fanfields3/master/FanFields3.png
 // @match           https://intel.ingress.com/*
 // @include         https://intel.ingress.com/*
@@ -6580,7 +6581,7 @@ function wrapper(plugin_info) {
     var builtLinks = {};
     var formedFields = {};
 
-    order.forEach(function (srcFp) {
+    order.forEach(function (srcFp, visitIndex) {
       var srcUnder = thisplugin.isPointUnderAnyTriangle(srcFp.point, result.triangles);
       result.underAtVisit[srcFp.guid] = srcUnder;
 
@@ -6600,7 +6601,9 @@ function wrapper(plugin_info) {
           if (formedFields[field.id]) return;
           if (!field.links.every(function (k) { return builtLinks[k]; })) return;
           formedFields[field.id] = true;
-          result.triangles.push({ a: field.points[0], b: field.points[1], c: field.points[2] });
+          // visitIndex: which step of `order` completes this field -- unused by
+          // validateUnderFieldLinks (the other caller), only by exportPlanPdf's report.
+          result.triangles.push({ a: field.points[0], b: field.points[1], c: field.points[2], visitIndex: visitIndex });
           formedHere++;
         });
         result.fieldsByDirectedLink[dkey] = formedHere;
@@ -8527,7 +8530,8 @@ function wrapper(plugin_info) {
       { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
       { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
       { label: 'Stats', action: thisplugin.showStatistics },
-      { label: 'Help', action: thisplugin.help }
+      { label: 'Help', action: thisplugin.help },
+      { label: 'Export&nbsp;plan&nbsp;PDF', action: thisplugin.exportPlanPdf }
     ];
 
     var $menu = $('<div id="plugin_fanfields3_mainmenu" class="plugin_fanfields3_mainmenu"></div>');
@@ -8559,6 +8563,199 @@ function wrapper(plugin_info) {
     $(document).one('keydown.plugin_fanfields3_mainmenu', function (e) {
       if (e.key === 'Escape') $menu.remove();
     });
+  };
+
+  // Step-by-step PDF of the current plan: one page per portal in the walk, showing the links
+  // thrown there (with how many fields each completes) and a map of the plan so far (links/
+  // fields already done vs. done at this step). Mirrors test/tools/generateWalkReportPdf.py,
+  // used to validate "Less walking" during development, but reading live plan state directly
+  // instead of a fixture, so it always reflects exactly what's about to be walked.
+  thisplugin.exportPlanPdf = function () {
+    var order = thisplugin.getDisplayOrder();
+    if (!order || order.length < 2) {
+      alert('Fan Fields 3: no plan to export yet -- draw a polygon around some portals first.');
+      return;
+    }
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+      alert('Fan Fields 3: the PDF export library failed to load (jsPDF). Check your connection and try reloading IITC.');
+      return;
+    }
+
+    var walk = thisplugin.simulateWalk(order);
+
+    // Every portal's own lat/lng (for the map) and title (for the text panel), keyed the same
+    // way simulateWalk keys its own triangle points, so a field's three corners can be matched
+    // back to real portals without re-deriving anything simulateWalk already knows.
+    var infoByPointKey = {};
+    order.forEach(function (fp) {
+      var ll = fp.portal.getLatLng();
+      infoByPointKey[thisplugin.pointKey(fp.point)] = { guid: fp.guid, title: fp.portal.options.data.title, lat: ll.lat, lng: ll.lng };
+    });
+    function infoFor(point) { return infoByPointKey[thisplugin.pointKey(point)]; }
+
+    var linkSeq = []; // { srcInfo, dstInfo, stepIndex }
+    order.forEach(function (fp, stepIndex) {
+      (fp.outgoing || []).forEach(function (target) {
+        linkSeq.push({ srcInfo: infoFor(fp.point), dstInfo: infoFor(target.point), stepIndex: stepIndex });
+      });
+    });
+
+    var mode = (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) ? 'outbound' : 'inbound';
+    var anchorTitle = order[0].portal.options.data.title;
+
+    var steps = order.map(function (fp, i) {
+      var prevFp = order[i - 1];
+      var distFromPrev = prevFp ? thisplugin.distanceTo(prevFp.point, fp.point) : 0;
+      var links = (fp.outgoing || []).map(function (target) {
+        var dkey = thisplugin.getDirectedLinkKey(fp.guid, target.guid);
+        return { title: target.portal.options.data.title, newFields: walk.fieldsByDirectedLink[dkey] || 0 };
+      });
+      return { info: infoFor(fp.point), distFromPrev: distFromPrev, links: links };
+    });
+    var cumulativeDist = 0;
+    steps.forEach(function (s) { cumulativeDist += s.distFromPrev; s.cumulativeDist = cumulativeDist; });
+
+    var runningLinks = 0, runningFields = 0;
+    var runningLinksAt = [], runningFieldsAt = [];
+    steps.forEach(function (s) {
+      runningLinks += s.links.length;
+      s.links.forEach(function (l) { runningFields += l.newFields; });
+      runningLinksAt.push(runningLinks);
+      runningFieldsAt.push(runningFields);
+    });
+
+    // Map bounds, in lat/lng, with an 8% margin -- same framing as the Python report.
+    var allLats = order.map(function (fp) { return infoFor(fp.point).lat; });
+    var allLngs = order.map(function (fp) { return infoFor(fp.point).lng; });
+    var minLat = Math.min.apply(null, allLats), maxLat = Math.max.apply(null, allLats);
+    var minLng = Math.min.apply(null, allLngs), maxLng = Math.max.apply(null, allLngs);
+    var latMargin = (maxLat - minLat) * 0.08 || 0.001;
+    var lngMargin = (maxLng - minLng) * 0.08 || 0.001;
+    minLat -= latMargin; maxLat += latMargin; minLng -= lngMargin; maxLng += lngMargin;
+
+    var pageW = 297; // A4 landscape, mm
+    var mapX = 10, mapY = 25, mapW = 165, mapH = 175;
+    var textX = 182;
+
+    var scale = Math.min(mapW / (maxLng - minLng), mapH / (maxLat - minLat));
+    var drawnW = (maxLng - minLng) * scale, drawnH = (maxLat - minLat) * scale;
+    var originX = mapX + (mapW - drawnW) / 2, originY = mapY + (mapH - drawnH) / 2;
+    function px(lng) { return originX + (lng - minLng) * scale; }
+    function py(lat) { return originY + (maxLat - lat) * scale; }
+
+    var doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+    for (var i = 0; i < steps.length; i++) {
+      if (i > 0) doc.addPage();
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(12);
+      doc.text('Fan Fields 3 — ' + mode + ' — anchor: ' + anchorTitle + ' — step ' + (i + 1) + '/' + steps.length,
+        pageW / 2, 14, { align: 'center' });
+
+      // All portals, as small gray dots.
+      doc.setFillColor(153, 153, 153);
+      order.forEach(function (fp) {
+        var inf = infoFor(fp.point);
+        doc.circle(px(inf.lng), py(inf.lat), 0.5, 'F');
+      });
+
+      // Fields: completed-before-this-step ones first (light gray), this step's new ones on top
+      // (red) -- same two-layer draw order as the map's links below.
+      [false, true].forEach(function (onlyCurrent) {
+        walk.triangles.forEach(function (t) {
+          if (t.visitIndex > i) return;
+          if (onlyCurrent !== (t.visitIndex === i)) return;
+          var a = infoFor(t.a), b = infoFor(t.b), c = infoFor(t.c);
+          if (!a || !b || !c) return;
+          doc.setFillColor.apply(doc, onlyCurrent ? [255, 153, 153] : [214, 214, 214]);
+          doc.triangle(px(a.lng), py(a.lat), px(b.lng), py(b.lat), px(c.lng), py(c.lat), 'F');
+        });
+      });
+
+      // Links: same already-done-first, this-step-on-top order, black vs. red.
+      [false, true].forEach(function (onlyCurrent) {
+        linkSeq.forEach(function (l) {
+          if (l.stepIndex > i) return;
+          if (onlyCurrent !== (l.stepIndex === i)) return;
+          doc.setDrawColor.apply(doc, onlyCurrent ? [230, 0, 0] : [51, 51, 51]);
+          doc.setLineWidth(onlyCurrent ? 0.6 : 0.25);
+          doc.line(px(l.srcInfo.lng), py(l.srcInfo.lat), px(l.dstInfo.lng), py(l.dstInfo.lat));
+        });
+      });
+
+      // Walked path so far, dashed blue, then the current position on top.
+      doc.setDrawColor(31, 111, 235);
+      doc.setLineWidth(0.3);
+      doc.setLineDashPattern([0.8, 0.6], 0);
+      for (var w = 0; w < i; w++) {
+        var p0 = infoFor(order[w].point), p1 = infoFor(order[w + 1].point);
+        doc.line(px(p0.lng), py(p0.lat), px(p1.lng), py(p1.lat));
+      }
+      doc.setLineDashPattern([], 0);
+
+      var curInfo = infoFor(order[i].point);
+      doc.setFillColor(31, 111, 235);
+      doc.circle(px(curInfo.lng), py(curInfo.lat), 1.3, 'F');
+      doc.setDrawColor(255, 255, 255);
+      doc.setLineWidth(0.3);
+      doc.circle(px(curInfo.lng), py(curInfo.lat), 1.3, 'D');
+
+      // Text panel.
+      doc.setFont('courier', 'normal');
+      doc.setFontSize(9);
+      var y = 25;
+      var lineH = 4.3;
+      function line(text) { doc.text(text, textX, y); y += lineH; }
+
+      line('Step ' + (i + 1) + ' / ' + steps.length);
+      y += lineH;
+      line('Portal: ' + steps[i].info.title);
+      y += lineH;
+      if (i > 0) line('From: ' + steps[i - 1].info.title);
+      line('Distance walked this step: ' + Math.round(steps[i].distFromPrev) + ' m');
+      line('Cumulative distance walked: ' + Math.round(steps[i].cumulativeDist) + ' m');
+      y += lineH;
+      if (steps[i].links.length) {
+        line('Links thrown here, in order:');
+        steps[i].links.forEach(function (l) {
+          var fieldTxt = l.newFields === 1 ? '1 field' : (l.newFields + ' fields');
+          line('  -> ' + l.title + ' (' + fieldTxt + ')');
+        });
+      } else {
+        line('No links thrown here.');
+      }
+      y += lineH;
+      line('Running totals: ' + runningLinksAt[i] + ' link(s), ' + runningFieldsAt[i] + ' field(s)');
+
+      // Legend.
+      var legendY = mapY + mapH + 4;
+      var legendItems = [
+        [[51, 51, 51], 'line', 'Links already thrown'],
+        [[230, 0, 0], 'line', 'New links (this step)'],
+        [[214, 214, 214], 'box', 'Fields already formed'],
+        [[255, 153, 153], 'box', 'New fields (this step)'],
+        [[31, 111, 235], 'line', 'Walked path']
+      ];
+      doc.setFontSize(8);
+      legendItems.forEach(function (item) {
+        var color = item[0], kind = item[1], label = item[2];
+        if (kind === 'line') {
+          doc.setDrawColor.apply(doc, color);
+          doc.setLineWidth(0.6);
+          doc.line(textX, legendY - 1, textX + 6, legendY - 1);
+        } else {
+          doc.setFillColor.apply(doc, color);
+          doc.rect(textX, legendY - 2.2, 4, 2.8, 'F');
+        }
+        doc.setFont('helvetica', 'normal');
+        doc.text(label, textX + 9, legendY);
+        legendY += 4.5;
+      });
+    }
+
+    var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
+    doc.save('Fan Fields 3 - ' + mode + ' plan - ' + safeAnchor + '.pdf');
   };
 
   // Settings persisted across sessions via "Save options as default" in the Options dialog.
