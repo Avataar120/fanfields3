@@ -4,7 +4,7 @@
 // @name            Fan Fields 3
 // @category        Layer
 // @version         6.3.0.20261005
-// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links (now safe to use across several of your devices at once), and route export to Google Maps / Portal Route or a step-by-step plan PDF. Enable from the layer chooser.
+// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links (now safe to use across several of your devices at once), and route export to Google Maps / Portal Route or a step-by-step plan report ("Plan details" menu). Enable from the layer chooser.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
 // @icon            https://raw.githubusercontent.com/Avataar120/fanfields3/master/fanfields3-32.png
@@ -35,7 +35,8 @@ function wrapper(plugin_info) {
   var changelog = [{
       version: '6.3.0',
       changes: [
-        'NEW: Added "Export plan PDF" to the hamburger menu: a step-by-step report of the plan currently on screen (one page per portal, with the links to throw there, a running total of links/fields, and a map of progress so far), saved as a file you can open or print from your phone.',
+        'NEW: Added a "Plan details" entry to the hamburger menu, gathering three ways to review or export the current plan -- "Print route" (the Task List, printable), "Print step by step plan" (one page per portal with the links to throw there, a running total of links/fields, and a map of progress so far, saved as a file you can open or print from your phone), and "Live simulation" (the planned walk previewed on the map, portal by portal). The separate Print and Walk sim buttons previously in the Task List moved here.',
+        'IMPROVE: Live simulation (previously "Walk sim") always draws each portal\'s own links as it reaches them now, instead of that being a separate option to turn on.',
         'FIX: "Less walking" could flip a link\'s direction in a way that, combined with an earlier flip, made the plan impossible to walk in a single pass (a portal needing a key from another portal that itself needed one from the first) — such a flip is no longer made.',
         'FIX: In outbound mode, the Task List could keep showing a portal as "moved by Less walking" even after it had been placed back in its natural position by the GPS-based reordering ahead of the anchor.',
         'FIX: "Less walking" could relocate a portal to a spot that looked cheaper on paper but actually made the real walk longer; it now double-checks the actual cost after relocating and undoes any move that doesn\'t really pay off -- including when that move only looked justified because it was compared to the wrong spot.',
@@ -1456,11 +1457,14 @@ function wrapper(plugin_info) {
         'Open <i>Task List</i> to get a step-by-step plan including per-portal key requirements, outgoing link counts, and (optional) link details. ' +
         'If you use a Keys/LiveInventory plugin, the task list can also show your available key counts, and keys are spent automatically from the Keys plugin as you throw links (toggle in Options: <i>Spend&nbsp;keys&nbsp;on&nbsp;throw</i>). ' +
         'With the Keys plugin, its <i>Keys video</i> button fills in your key counts from a screen recording of your keys in Ingress. ' +
-        'The task list includes a navigation link for Google Maps and a print-friendly view. ' +
-        'Use <i>Export&nbsp;plan&nbsp;PDF</i> (menu) to save a step-by-step report of the current plan — one page per portal with the links to throw there, a running total of links/fields completed, and a map of your progress so far — as a file you can open or print from your phone. ' +
+        'The task list includes a navigation link for Google Maps. ' +
         'Its <i>Reroute</i> button reorders the steps still to do, starting from your current position (GPS, else IITC\'s own location, else the map center), so you walk as little as possible — while still capturing each portal, and getting its keys, before anyone links to it, and without losing a field. ' +
-        'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>). ' +
-        'Its <i>Walk&nbsp;sim</i> button closes the list and previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached (toggle in Options: <i>Walk&nbsp;sim&nbsp;links</i>); tap the map to dismiss it.</p>' +
+        'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>).</p>' +
+
+        '<p><b>Plan details (menu)</b><br>' +
+        '<i>Print&nbsp;route</i> prints the Task List exactly as it stands (per-portal key requirements, link details and all). ' +
+        '<i>Print&nbsp;step&nbsp;by&nbsp;step&nbsp;plan</i> saves a step-by-step report of the current plan — one page per portal with the links to throw there, a running total of links/fields completed, and a map of your progress so far — as a file you can open or print from your phone. ' +
+        '<i>Live&nbsp;simulation</i> previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached, with a running counter of links, fields and distance walked so far; tap the map to dismiss it.</p>' +
 
         '<p><b>Statistics</b><br>' +
         'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Real activity</i> section showing how many links and fields your faction has actually thrown/formed in-game, read straight from the Intel — not from the plan — so you can compare progress against the plan. ' +
@@ -2312,8 +2316,7 @@ function wrapper(plugin_info) {
     text += '<div style="margin-top:10px; text-align:right;">' +
       '  <button id="plugin_fanfields3_reset_link_flips_btn"' + (flipCount === 0 && !routeInfo ? ' disabled' : '') +
       '    title="Revert all manually flipped links (' + flipCount + ') back to automatic calculation' +
-      (routeInfo ? ', and drop the Reroute order' : '') + '">Reset link orders</button> ' +
-      '  <button id="plugin_fanfields3_export_pdf_btn">Print</button>' +
+      (routeInfo ? ', and drop the Reroute order' : '') + '">Reset link orders</button>' +
       '</div>';
 
     text += '<div style="margin-top:10px;">';
@@ -2477,12 +2480,6 @@ function wrapper(plugin_info) {
         thisplugin.refreshTaskListDialog();
       });
 
-    $('#plugin_fanfields3_export_pdf_btn')
-      .off('click')
-      .on('click', function () {
-        thisplugin.exportTaskListToPDF();
-      });
-
     if (thisplugin.isCompatiblePortalRoutePlugin()) {
       $('#plugin_fanfields3_portal_route_link')
         .off('click')
@@ -2606,8 +2603,7 @@ function wrapper(plugin_info) {
       '<button type="button" id="plugin_fanfields3_tasklist_shift_right" class="plugin_fanfields3_tasklist_shift_btn" title="FanFields shift right">' +
       symbol_clockwise + '</button>' +
       '<button type="button" id="plugin_fanfields3_tasklist_refresh" class="plugin_fanfields3_tasklist_shift_btn" title="Force an IITC map data refresh">Refresh</button>' +
-      '<button type="button" id="plugin_fanfields3_tasklist_reroute" class="plugin_fanfields3_tasklist_shift_btn" title="Reorder the steps still to do, starting from your current position, to walk as little as possible">Reroute</button>' +
-      '<button type="button" id="plugin_fanfields3_tasklist_walksim" class="plugin_fanfields3_tasklist_shift_btn" title="Close this list and preview the planned walk on the map, portal by portal">Walk sim</button>';
+      '<button type="button" id="plugin_fanfields3_tasklist_reroute" class="plugin_fanfields3_tasklist_shift_btn" title="Reorder the steps still to do, starting from your current position, to walk as little as possible">Reroute</button>';
     if (window.plugin.keys) {
       buttonsHtml += '<button type="button" id="plugin_fanfields3_tasklist_keysvideo" class="plugin_fanfields3_tasklist_shift_btn" title="Update the Keys plugin from a screen recording of your keys in Ingress">Keys video</button>';
     }
@@ -2649,12 +2645,6 @@ function wrapper(plugin_info) {
       .on('click', function () {
         thisplugin.openKeysVideoDialog();
       });
-    $buttonpane.find('#plugin_fanfields3_tasklist_walksim')
-      .off('click')
-      .on('click', function () {
-        $('#plugin_fanfields3_exportText_inner').closest('.ui-dialog-content').dialog('close');
-        thisplugin.startWalkSim();
-      });
   };
 
   // ---------------------------------------------------------------------
@@ -2669,8 +2659,9 @@ function wrapper(plugin_info) {
   thisplugin.WALK_SIM_DWELL_MS = 150;   // pause at each stop before moving on
 
   // Whether the sim also draws each portal's own outgoing links (thinner, same cyan) as the
-  // walk reaches it — lets the fields visibly form alongside the walk itself. Persisted with
-  // the other options (Options dialog); defaults on.
+  // walk reaches it — lets the fields visibly form alongside the walk itself. Always on (no
+  // longer a user-facing option); an older saved op or default that still carries its own
+  // walkSimShowLinks: false is simply ignored (see applyOptionsSnapshot), not applied.
   thisplugin.walkSimShowLinks = true;
 
   // The ordered stops to animate through: every walk portal, with any Blockers Destroy stop
@@ -3138,19 +3129,11 @@ function wrapper(plugin_info) {
     });
   };
 
+  // Builds the Task List fresh (not from an already-open dialog, since this is also reachable
+  // directly from the hamburger menu's "Plan details" submenu without the Task List ever being
+  // open) and opens it in a new window for printing, with every link detail row expanded.
   thisplugin.exportTaskListToPDF = function () {
-    const id = 'plugin_fanfields3_alert_textExport';
-
-    // Resolve the actual dialog content element.
-    // IITC/jQuery-UI may wrap the original element inside a dialog container.
-
-    let $dlg = $('#dialog-' + id + ' .ui-dialog-content');
-    if (!$dlg.length) $dlg = $('#dialog-' + id);
-    if (!$dlg.length) $dlg = $('#' + id);
-    if (!$dlg.length) return;
-
-
-    // Ensure all link detail rows are expanded before exporting
+    var $dlg = $('<div></div>').html(thisplugin.buildTaskListHTML());
 
     $dlg.find('[plugin_fanfields3_exportText_toggle="toggle"]')
       .each(function () {
@@ -8762,23 +8745,12 @@ function wrapper(plugin_info) {
     map.addControl(new thisplugin.ffButtons());
   };
 
-  // Popup menu opened from the map's hamburger icon: one-shot actions that have no icon of
-  // their own in the topleft bar.
-  thisplugin.showMainMenu = function (anchorEl) {
+  // Popup menu opened from the map's hamburger icon (and, for an entry with its own `submenu`,
+  // opened again from there): one-shot actions that have no icon of their own in the topleft
+  // bar. Shared by thisplugin.showMainMenu and any submenu it opens, so both look and behave
+  // the same way.
+  thisplugin.buildPopupMenu = function (entries, position) {
     $('#plugin_fanfields3_mainmenu').remove();
-
-    var entries = [
-      { label: 'Options&hellip;', action: thisplugin.showOptionsDialog },
-      {
-        label: thisplugin.isPickingAnchor ? 'Pick&nbsp;anchor&nbsp;(click&nbsp;to&nbsp;cancel)' : 'Pick&nbsp;anchor',
-        action: thisplugin.toggleAnchorPicking
-      },
-      { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
-      { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
-      { label: 'Stats', action: thisplugin.showStatistics },
-      { label: 'Help', action: thisplugin.help },
-      { label: 'Export&nbsp;plan&nbsp;PDF', action: thisplugin.exportPlanPdf }
-    ];
 
     var $menu = $('<div id="plugin_fanfields3_mainmenu" class="plugin_fanfields3_mainmenu"></div>');
     entries.forEach(function (entry) {
@@ -8786,16 +8758,19 @@ function wrapper(plugin_info) {
         .html(entry.label)
         .on('click', function () {
           $menu.remove();
-          entry.action();
+          if (entry.submenu) {
+            thisplugin.buildPopupMenu(entry.submenu, position);
+          } else {
+            entry.action();
+          }
         })
         .appendTo($menu);
     });
 
-    var rect = anchorEl.getBoundingClientRect();
     $menu.css({
       position: 'fixed',
-      top: rect.bottom,
-      left: rect.left
+      top: position.top,
+      left: position.left
     });
 
     $('body').append($menu);
@@ -8809,6 +8784,33 @@ function wrapper(plugin_info) {
     $(document).one('keydown.plugin_fanfields3_mainmenu', function (e) {
       if (e.key === 'Escape') $menu.remove();
     });
+  };
+
+  thisplugin.showMainMenu = function (anchorEl) {
+    var entries = [
+      { label: 'Options&hellip;', action: thisplugin.showOptionsDialog },
+      {
+        label: thisplugin.isPickingAnchor ? 'Pick&nbsp;anchor&nbsp;(click&nbsp;to&nbsp;cancel)' : 'Pick&nbsp;anchor',
+        action: thisplugin.toggleAnchorPicking
+      },
+      { label: 'Manage&nbsp;ops', action: thisplugin.showManageOpsDialog },
+      { label: 'Manage&nbsp;order', action: thisplugin.showManageOrderDialog },
+      { label: 'Stats', action: thisplugin.showStatistics },
+      { label: 'Help', action: thisplugin.help },
+      { label: 'Plan&nbsp;details', submenu: [
+          { label: 'Print&nbsp;route', action: thisplugin.exportTaskListToPDF },
+          { label: 'Print&nbsp;step&nbsp;by&nbsp;step&nbsp;plan', action: thisplugin.exportPlanPdf },
+          { label: 'Live&nbsp;simulation', action: function () {
+              $('#plugin_fanfields3_exportText_inner').closest('.ui-dialog-content').dialog('close');
+              thisplugin.startWalkSim();
+            }
+          }
+        ]
+      }
+    ];
+
+    var rect = anchorEl.getBoundingClientRect();
+    thisplugin.buildPopupMenu(entries, { top: rect.bottom, left: rect.left });
   };
 
   // Step-by-step PDF of the current plan: one page per portal in the walk, showing the links
@@ -9084,7 +9086,6 @@ function wrapper(plugin_info) {
       useBookmarksOnly: thisplugin.use_bookmarks_only,
       manageBlockers: thisplugin.manageBlockers,
       blockerMaxDetourM: thisplugin.blockerMaxDetourM,
-      walkSimShowLinks: thisplugin.walkSimShowLinks,
       consumeKeysOnLinkThrown: thisplugin.consumeKeysOnLinkThrown
     };
   };
@@ -9101,7 +9102,8 @@ function wrapper(plugin_info) {
     if (typeof saved.useBookmarksOnly === 'boolean') thisplugin.use_bookmarks_only = saved.useBookmarksOnly;
     if (typeof saved.manageBlockers === 'boolean') thisplugin.manageBlockers = saved.manageBlockers;
     if (typeof saved.blockerMaxDetourM === 'number') thisplugin.blockerMaxDetourM = saved.blockerMaxDetourM;
-    if (typeof saved.walkSimShowLinks === 'boolean') thisplugin.walkSimShowLinks = saved.walkSimShowLinks;
+    // saved.walkSimShowLinks (an older saved op/default may still carry it) is intentionally
+    // never read any more: the sim's own links are always shown now, not a toggle.
     if (typeof saved.consumeKeysOnLinkThrown === 'boolean') thisplugin.consumeKeysOnLinkThrown = saved.consumeKeysOnLinkThrown;
   };
 
@@ -9207,13 +9209,6 @@ function wrapper(plugin_info) {
     }
 
     html += '<div class="plugin_fanfields3_options_row">' +
-      '<label for="plugin_fanfields3_opt_walksim_links" title="While Walk sim plays, also draw each portal\'s own links (thin cyan) as the walk reaches it">Walk&nbsp;sim&nbsp;links</label>' +
-      '<select id="plugin_fanfields3_opt_walksim_links">' +
-      '<option value="on"' + (thisplugin.walkSimShowLinks ? ' selected' : '') + '>On</option>' +
-      '<option value="off"' + (!thisplugin.walkSimShowLinks ? ' selected' : '') + '>Off</option>' +
-      '</select></div>';
-
-    html += '<div class="plugin_fanfields3_options_row">' +
       '<label for="plugin_fanfields3_opt_spendkeys" title="When a link is detected as newly thrown in-game, remove one key for its destination portal from the Keys plugin (never below 0)">Spend&nbsp;keys&nbsp;on&nbsp;throw</label>' +
       '<select id="plugin_fanfields3_opt_spendkeys">' +
       '<option value="on"' + (thisplugin.consumeKeysOnLinkThrown ? ' selected' : '') + '>On</option>' +
@@ -9272,11 +9267,6 @@ function wrapper(plugin_info) {
     $('#plugin_fanfields3_opt_portals').on('change', function () {
       var wantBookmarksOnly = ($(this).val() === 'bookmarks');
       if (wantBookmarksOnly !== thisplugin.use_bookmarks_only) thisplugin.useBookmarksOnly();
-      thisplugin.saveOptionsDefault();
-    });
-
-    $('#plugin_fanfields3_opt_walksim_links').on('change', function () {
-      thisplugin.walkSimShowLinks = ($(this).val() === 'on');
       thisplugin.saveOptionsDefault();
     });
 
