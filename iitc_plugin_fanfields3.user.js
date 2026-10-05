@@ -3,8 +3,8 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.2.1.20261004
-// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links, and route export to Google Maps / Portal Route. Enable from the layer chooser.
+// @version         6.3.0.20261005
+// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links (now safe to use across several of your devices at once), and route export to Google Maps / Portal Route or a step-by-step plan PDF. Enable from the layer chooser.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
 // @icon            https://raw.githubusercontent.com/Avataar120/fanfields3/master/fanfields3-32.png
@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-04-231500';
+  plugin_info.dateTimeVersion = '2026-10-05-200000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -33,6 +33,17 @@ function wrapper(plugin_info) {
 
   var arcname = (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'Arc' : '***';
   var changelog = [{
+      version: '6.3.0',
+      changes: [
+        'NEW: Added "Export plan PDF" to the hamburger menu: a step-by-step report of the plan currently on screen (one page per portal, with the links to throw there, a running total of links/fields, and a map of progress so far), saved as a file you can open or print from your phone.',
+        'FIX: "Less walking" could flip a link\'s direction in a way that, combined with an earlier flip, made the plan impossible to walk in a single pass (a portal needing a key from another portal that itself needed one from the first) — such a flip is no longer made.',
+        'FIX: In outbound mode, the Task List could keep showing a portal as "moved by Less walking" even after it had been placed back in its natural position by the GPS-based reordering ahead of the anchor.',
+        'FIX: "Less walking" could relocate a portal to a spot that looked cheaper on paper but actually made the real walk longer; it now double-checks the actual cost after relocating and undoes any move that doesn\'t really pay off -- including when that move only looked justified because it was compared to the wrong spot.',
+        'IMPROVE: "Less walking" now also considers flipping a mesh link to reach a genuinely cheaper spot elsewhere in the walk, not just reverting a relocation that its own immediate neighbors couldn\'t justify.',
+        'IMPROVE: In outbound mode, the walking order ahead of the anchor now also tries starting from "Less walking"\'s own existing order, keeping it when it\'s shorter than reordering from scratch.',
+        'FIX: Spent-key tracking is now safe to use across several devices at once (with the separate Simple Cloud Sync plugin): a key is never deducted twice for the same link, and a brand new device waits for its first sync to land before assuming it has no charged links yet.',
+      ],
+    },{
       version: '6.2.1',
       changes: [
         'FIX: The automatic "Spend keys on throw" no longer re-spends a key for a link you had already thrown before reloading IITC, or loses track of one thrown while IITC was closed — each link now only ever spends a key once, whenever it\'s first seen.',
@@ -1446,6 +1457,7 @@ function wrapper(plugin_info) {
         'If you use a Keys/LiveInventory plugin, the task list can also show your available key counts, and keys are spent automatically from the Keys plugin as you throw links (toggle in Options: <i>Spend&nbsp;keys&nbsp;on&nbsp;throw</i>). ' +
         'With the Keys plugin, its <i>Keys video</i> button fills in your key counts from a screen recording of your keys in Ingress. ' +
         'The task list includes a navigation link for Google Maps and a print-friendly view. ' +
+        'Use <i>Export&nbsp;plan&nbsp;PDF</i> (menu) to save a step-by-step report of the current plan — one page per portal with the links to throw there, a running total of links/fields completed, and a map of your progress so far — as a file you can open or print from your phone. ' +
         'Its <i>Reroute</i> button reorders the steps still to do, starting from your current position (GPS, else IITC\'s own location, else the map center), so you walk as little as possible — while still capturing each portal, and getting its keys, before anyone links to it, and without losing a field. ' +
         'The links and fields stay the same, it works while the plan is locked too, and the new order holds until the plan itself changes (or <i>Reset&nbsp;link&nbsp;orders</i>). ' +
         'Its <i>Walk&nbsp;sim</i> button closes the list and previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached (toggle in Options: <i>Walk&nbsp;sim&nbsp;links</i>); tap the map to dismiss it.</p>' +
