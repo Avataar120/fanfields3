@@ -949,6 +949,14 @@ function wrapper(plugin_info) {
     thisplugin.ensureOutboundPositionTracking();
     if (thisplugin.outboundPlayerPosition) {
       before = thisplugin.orderPrefixForOutbound(before, anchor, after, thisplugin.outboundPlayerPosition.latlng);
+      // Whatever "Less walking" (computeDistanceOrderReordering) decided for this segment is
+      // entirely superseded by the reorder just above — every portal in it was just placed by
+      // orderPrefixForOutbound's own search, not by that earlier relocation. Dropping them from
+      // relocatedForLessWalkingGuids here stops the Task List from flagging (green, "capture
+      // early") a portal based on a position it no longer actually has.
+      if (Object.keys(thisplugin.relocatedForLessWalkingGuids).length) {
+        before.forEach(function (fp) { delete thisplugin.relocatedForLessWalkingGuids[fp.guid]; });
+      }
     }
     // No cached position yet: ensureOutboundPositionTracking() above has a fetch under way and
     // redraws once it resolves — leave this segment in its natural order meanwhile.
@@ -6969,6 +6977,14 @@ function wrapper(plugin_info) {
 
     // Portals whose mesh link actually flips below — these are the ones relocated further down.
     var meshFlippedGuids = {};
+    // Candidates whose detour cost was a plain triangle-inequality number (every one except a
+    // "last in the walk, nothing to route around" candidate, forced through unconditionally and
+    // marked Infinity here so the verification pass below never second-guesses it) — see
+    // isMoveWorthwhile for how this is used once the actual insertion point is known.
+    var savingsByGuid = {};
+    // Which edge (by key) a given guid's mesh link flip touched, so a candidate that turns out
+    // not to pay off (see below) can have that flip undone, not just its walk position.
+    var flippedEdgeKeyByGuid = {};
 
     // Mesh links: only the current thrower can qualify (its own 2 outgoing links are the fan
     // link plus exactly this one mesh link) — flip it to point at the thrower only if visiting
@@ -6984,21 +7000,23 @@ function wrapper(plugin_info) {
       var nextFp = sorted[indexByGuid[e.srcGuid] + 1];
 
       var shouldFlip;
-      var direct;
+      var detourCost;
       if (nextFp) {
         // Triangle inequality on the portal's own neighbors: visiting it (prevFp -> src ->
         // nextFp) only "costs" something over skipping it (prevFp -> nextFp direct) when it's
         // really a detour. A margin avoids flipping over floating-point noise on three
         // near-collinear portals, where there's nothing to gain either way.
         var viaSrc = dist(prevFp.guid, e.srcGuid) + dist(e.srcGuid, nextFp.guid);
-        direct = dist(prevFp.guid, nextFp.guid);
-        shouldFlip = viaSrc > direct + 1e-6;
+        var direct = dist(prevFp.guid, nextFp.guid);
+        detourCost = viaSrc - direct;
+        shouldFlip = detourCost > 1e-6;
       } else {
         // Last portal in the walk: there's no "next" to route around, so it's never really "on
         // the way" to anything — let it through to the feasibility check below, same as any
         // other candidate. Worst case, the reordering step's cheapest insertion puts it right
         // back at the end, same as leaving it unflipped would have.
         shouldFlip = true;
+        detourCost = Infinity;
       }
 
       var partnerIsDegreeOne = outgoingCountByGuid[e.dstGuid] === 1;
@@ -7019,6 +7037,8 @@ function wrapper(plugin_info) {
       if (thisplugin.hasPrecedenceCycle(trial)) return; // would make no walk order satisfy every key dependency
 
       meshFlippedGuids[e.srcGuid] = true;
+      savingsByGuid[e.srcGuid] = detourCost;
+      flippedEdgeKeyByGuid[e.srcGuid] = e.key;
       e.srcGuid = desiredSrc;
       e.dstGuid = desiredDst;
     });
@@ -7038,28 +7058,79 @@ function wrapper(plugin_info) {
       var nextFp = sorted[indexByGuid[fp.guid] + 1];
 
       var shouldRelocate;
+      var detourCost;
       if (nextFp) {
         var viaSrc = dist(prevFp.guid, fp.guid) + dist(fp.guid, nextFp.guid);
         var direct = dist(prevFp.guid, nextFp.guid);
-        shouldRelocate = viaSrc > direct + 1e-6;
+        detourCost = viaSrc - direct;
+        shouldRelocate = detourCost > 1e-6;
       } else {
         shouldRelocate = true;
+        detourCost = Infinity;
       }
-      if (shouldRelocate) meshFlippedGuids[fp.guid] = true;
+      if (shouldRelocate) {
+        meshFlippedGuids[fp.guid] = true;
+        savingsByGuid[fp.guid] = detourCost;
+      }
     });
-
-    var flips = thisplugin.flipsFromDirections(current, naturalByKey);
 
     // Every portal that throws a link AT a given guid, in the final (post-flip) direction —
     // used by computeDistanceOrderReordering so a relocated portal never lands in the walk
     // after something that needs it already captured.
-    var incomingSourcesByGuid = {};
-    current.forEach(function (e) {
-      (incomingSourcesByGuid[e.dstGuid] = incomingSourcesByGuid[e.dstGuid] || []).push(e.srcGuid);
-    });
+    function buildIncomingSourcesByGuid(edgeList) {
+      var map = {};
+      edgeList.forEach(function (e) {
+        (map[e.dstGuid] = map[e.dstGuid] || []).push(e.srcGuid);
+      });
+      return map;
+    }
 
-    // Relocate each flipped portal into the walk/display order.
-    var reorderResult = thisplugin.computeDistanceOrderReordering(meshFlippedGuids, incomingSourcesByGuid);
+    // Relocate each flipped/degree-one portal into the walk/display order, then check whether
+    // each one actually paid off THERE — the decisions above only ever compared a candidate
+    // against its own two immediate neighbors in the base build order, never against where
+    // computeDistanceOrderReordering's cheapest insertion actually ends up placing it, which can
+    // land somewhere the detour it avoided is smaller than the one it just created. A candidate
+    // that doesn't pay off is reverted (walk position AND, if it had one, its link flip) and the
+    // walk is rebuilt once more without it — same reasoning computeDistanceOrderFlips already
+    // applies per candidate, just checked again now that the real insertion cost is known instead
+    // of assumed.
+    function buildReorder(relocateGuids) {
+      return thisplugin.computeDistanceOrderReordering(relocateGuids, buildIncomingSourcesByGuid(current));
+    }
+
+    function insertionCost(orderGuids, guid) {
+      var idx = orderGuids.indexOf(guid);
+      var prevGuid = orderGuids[idx - 1];
+      var nextGuid = orderGuids[idx + 1];
+      if (prevGuid !== undefined && nextGuid !== undefined) {
+        return dist(prevGuid, guid) + dist(guid, nextGuid) - dist(prevGuid, nextGuid);
+      }
+      if (prevGuid !== undefined) return dist(prevGuid, guid);
+      if (nextGuid !== undefined) return dist(guid, nextGuid);
+      return 0;
+    }
+
+    var reorderResult = buildReorder(meshFlippedGuids);
+
+    if (reorderResult) {
+      var toRevert = Object.keys(reorderResult.movedGuids).filter(function (guid) {
+        return insertionCost(reorderResult.order, guid) > savingsByGuid[guid] + 1e-6;
+      });
+
+      if (toRevert.length) {
+        toRevert.forEach(function (guid) {
+          delete meshFlippedGuids[guid];
+          var edgeKey = flippedEdgeKeyByGuid[guid];
+          if (!edgeKey) return; // a degree-one relocation, no flip to undo
+          var edge = current.filter(function (e) { return e.key === edgeKey; })[0];
+          if (edge) { var tmp = edge.srcGuid; edge.srcGuid = edge.dstGuid; edge.dstGuid = tmp; }
+        });
+        reorderResult = buildReorder(meshFlippedGuids);
+      }
+    }
+
+    var flips = thisplugin.flipsFromDirections(current, naturalByKey);
+
     if (reorderResult) {
       thisplugin.displayOrderGuids = reorderResult.order;
       thisplugin.relocatedForLessWalkingGuids = reorderResult.movedGuids;
