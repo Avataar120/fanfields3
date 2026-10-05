@@ -37,6 +37,7 @@ function wrapper(plugin_info) {
       changes: [
         'NEW: Added a "Plan details" entry to the hamburger menu, gathering three ways to review or export the current plan -- "Print route" (the Task List, printable), "Print step by step plan" (one page per portal with the links to throw there, a running total of links/fields, and a map of progress so far, saved as a file you can open or print from your phone), and "Live simulation" (the planned walk previewed on the map, portal by portal). The separate Print and Walk sim buttons previously in the Task List moved here.',
         'IMPROVE: Live simulation (previously "Walk sim") always draws each portal\'s own links as it reaches them now, instead of that being a separate option to turn on.',
+        'FIX: The Statistics window\'s "Real activity" used to count every link and field your whole faction threw/formed, not just your own -- it now reads the faction Comm feed instead of the plan\'s own intel data, so it only counts what you personally did, limited to today (Comm history on Niantic\'s own servers doesn\'t reliably reach further back than that).',
         'FIX: "Less walking" could flip a link\'s direction in a way that, combined with an earlier flip, made the plan impossible to walk in a single pass (a portal needing a key from another portal that itself needed one from the first) — such a flip is no longer made.',
         'FIX: In outbound mode, the Task List could keep showing a portal as "moved by Less walking" even after it had been placed back in its natural position by the GPS-based reordering ahead of the anchor.',
         'FIX: "Less walking" could relocate a portal to a spot that looked cheaper on paper but actually made the real walk longer; it now double-checks the actual cost after relocating and undoes any move that doesn\'t really pay off -- including when that move only looked justified because it was compared to the wrong spot.',
@@ -1467,7 +1468,7 @@ function wrapper(plugin_info) {
         '<i>Live&nbsp;simulation</i> previews the whole walk on the map, portal by portal, drawing each portal\'s own links and fields as they\'re reached, with a running counter of links, fields and distance walked so far; tap the map to dismiss it.</p>' +
 
         '<p><b>Statistics</b><br>' +
-        'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Real activity</i> section showing how many links and fields your faction has actually thrown/formed in-game, read straight from the Intel — not from the plan — so you can compare progress against the plan. ' +
+        'Open <i>Stats</i> (menu) for the plan\'s own totals (keys, links, fields, walking distance) alongside a <i>Your&nbsp;activity&nbsp;today</i> section showing how many links and fields you personally have thrown/formed in-game today, read from the faction Comm feed — not from the plan — so you can compare your own progress against it. <i>Refresh</i> re-reads Comm; it only covers today, and however far back Comm history and your current map view actually reach. ' +
         'Switch its window (<i>Today</i>, <i>2&nbsp;days</i>, <i>7&nbsp;days</i>) to count further back; it refreshes on its own while the window stays open.</p>' +
 
         '<hr noshade>' +
@@ -1498,63 +1499,125 @@ function wrapper(plugin_info) {
     return total;
   };
 
-  // Real activity (Task List "Stats" window): how many links/fields of the player's own
-  // faction were actually thrown/formed in-game within a trailing window, counted straight
-  // from the live INTEL data (window.links/window.fields) rather than the plan's own computed
-  // links/fields — so it can be compared against what the plan itself calls for. A link/field
-  // entity's own timestamp (ms since epoch) is set once, at creation, and never changes
-  // afterwards (it's only ever created or destroyed) — see IITC's own
-  // Renderer.prototype.createLinkEntity/createFieldEntity — so this is exactly its throw/
-  // creation time, not a "last seen" time.
-  thisplugin.STATS_ACTIVITY_WINDOWS = [
-    { key: 'today', label: 'Today' },
-    { key: '2d', label: '2 days' },
-    { key: '7d', label: '7 days' }
-  ];
-  thisplugin.statsActivityWindow = 'today';
+  // Real activity (Task List "Stats" window): how many links/fields the PLAYER THEMSELVES
+  // (not their whole faction) actually threw/formed in-game today. window.links/window.fields
+  // only ever carry a TEAM, never an agent name, so this can't be computed from them (an
+  // earlier version of this feature did, and ended up counting every teammate's activity too,
+  // not just the player's own) — the only place IITC exposes WHO performed an action is the
+  // faction Comm feed, where a "linked"/"created a Control Field" message's PLAYER markup
+  // names the agent. See thisplugin.refreshMyActivityToday for how that's fetched.
+  //
+  // Scoped to today (local midnight) only, and to whatever map area Comm currently requests
+  // data for (IITC's own chat bounding box) — Niantic's own Comm history retention is short
+  // (hours, not a guaranteed full day), so a longer window would often come back incomplete or
+  // empty anyway; this already accepts that same-day risk rather than pretending to cover more.
+  thisplugin.MY_ACTIVITY_MAX_HISTORY_PAGES = 8;
+  thisplugin.MY_ACTIVITY_PAGE_TIMEOUT_MS = 6000;
 
-  // The cutoff timestamp (ms since epoch) for a given window: local midnight for 'today' (i.e.
-  // since the day's first link/field), else a rolling N*24h lookback.
-  thisplugin.getActivityWindowCutoff = function (mode) {
-    if (mode === '2d') return Date.now() - 2 * 24 * 60 * 60 * 1000;
-    if (mode === '7d') return Date.now() - 7 * 24 * 60 * 60 * 1000;
+  thisplugin.myActivityToday = { links: 0, fields: 0 };
+  thisplugin.myActivityState = 'idle'; // 'idle' | 'loading' | 'done' | 'error'
+  thisplugin._myActivityRequestToken = 0;
+
+  thisplugin.getTodayCutoff = function () {
     var now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   };
 
-  thisplugin.computeRealActivityStats = function (mode) {
-    var result = { links: 0, fields: 0 };
-    var ownTeam = thisplugin.getOwnFactionTeam();
-    if (ownTeam === undefined) return result;
+  // Tallies, among every faction Comm message gathered so far this refresh (processed: the
+  // same accumulated guid -> [time, auto, html, nick, parsedData] hash IITC's own comm.js
+  // hands to 'factionChatDataAvailable' listeners), how many were thrown/formed by the player
+  // themselves today. Also reports the oldest message's own time, so the caller knows whether
+  // paging back further could still reach anything newer than the cutoff.
+  thisplugin.tallyMyActivity = function (processed) {
+    var cutoff = thisplugin.getTodayCutoff();
+    var ownName = window.PLAYER && window.PLAYER.nickname;
+    var result = { links: 0, fields: 0, oldestSeen: Infinity };
+    if (!ownName) return result;
 
-    var cutoff = thisplugin.getActivityWindowCutoff(mode);
+    Object.keys(processed).forEach(function (guid) {
+      var parsed = processed[guid][4];
+      if (!parsed || !parsed.player || parsed.player.name !== ownName) return;
+      if (parsed.time < result.oldestSeen) result.oldestSeen = parsed.time;
+      if (parsed.time < cutoff) return;
 
-    for (var lguid in window.links) {
-      var link = window.links[lguid];
-      if (link.options.team === ownTeam && link.options.timestamp >= cutoff) result.links++;
-    }
-    for (var fguid in window.fields) {
-      var field = window.fields[fguid];
-      if (field.options.team === ownTeam && field.options.timestamp >= cutoff) result.fields++;
-    }
+      var text = (parsed.markup || []).map(function (m) { return m[0] === 'TEXT' ? m[1].plain : ''; }).join('');
+      if (text.indexOf('destroyed') !== -1) return; // destroying something isn't "activity" for this count
+      if (text.indexOf('created a Control Field') !== -1) { result.fields++; return; }
+      if (text.indexOf('linked') !== -1) result.links++;
+    });
     return result;
   };
 
-  thisplugin.buildRealActivityHTML = function () {
-    var stats = thisplugin.computeRealActivityStats(thisplugin.statsActivityWindow);
+  // Fetches the faction Comm feed, paging back (IITC.comm.requestChannel's own getOlderMsgs)
+  // until either today's local midnight is reached, the server stops returning anything new
+  // (end of its own retention), or MY_ACTIVITY_MAX_HISTORY_PAGES is hit — then updates
+  // thisplugin.myActivityToday/State and, if the Stats dialog is open, its activity section.
+  thisplugin.refreshMyActivityToday = function () {
+    thisplugin.myActivityState = 'loading';
+    $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
 
-    var html = '<hr noshade><div class="plugin_fanfields3_activity">';
-    html += '<div class="plugin_fanfields3_activity_title">Real activity (from Intel, own faction)</div>';
-    html += '<table><tr><td>Links thrown:</td><td>' + stats.links + '</td></tr>';
-    html += '<tr><td>Fields created:</td><td>' + stats.fields + '</td></tr></table>';
-    html += '<div class="plugin_fanfields3_activity_buttons">';
-    thisplugin.STATS_ACTIVITY_WINDOWS.forEach(function (w) {
-      html += '<button type="button" class="plugin_fanfields3_activity_btn' +
-        (thisplugin.statsActivityWindow === w.key ? ' plugin_fanfields3_activity_btn_active' : '') +
-        '" data-window="' + w.key + '">' + w.label + '</button>';
-    });
-    html += '</div></div>';
-    return html;
+    if (!window.IITC || !window.IITC.comm || typeof window.IITC.comm.requestChannel !== 'function' ||
+      !(window.PLAYER && window.PLAYER.nickname)) {
+      thisplugin.myActivityState = 'error';
+      $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
+      return;
+    }
+
+    var token = ++thisplugin._myActivityRequestToken;
+    var cutoff = thisplugin.getTodayCutoff();
+    var pagesLeft = thisplugin.MY_ACTIVITY_MAX_HISTORY_PAGES;
+    var pageTimer = null;
+
+    function finish(tally) {
+      if (token !== thisplugin._myActivityRequestToken) return; // superseded by a newer refresh
+      clearTimeout(pageTimer);
+      window.removeHook('factionChatDataAvailable', onPage);
+      thisplugin.myActivityToday = { links: tally.links, fields: tally.fields };
+      thisplugin.myActivityState = 'done';
+      $('#plugin_fanfields3_activity_body').html(thisplugin.buildRealActivityBodyHTML());
+    }
+
+    function requestPage(olderMsgs) {
+      if (typeof window.idleReset === 'function') window.idleReset();
+      window.IITC.comm.requestChannel('faction', olderMsgs);
+      // No response at all (server error, or simply no older data left to send) never fires
+      // the hook below — this is what stops the pagination in that case instead of hanging.
+      pageTimer = setTimeout(function () { finish(thisplugin.tallyMyActivity({})); }, thisplugin.MY_ACTIVITY_PAGE_TIMEOUT_MS);
+    }
+
+    function onPage(data) {
+      if (token !== thisplugin._myActivityRequestToken) return;
+      clearTimeout(pageTimer);
+      var tally = thisplugin.tallyMyActivity(data.processed);
+      pagesLeft--;
+      if (tally.oldestSeen <= cutoff || pagesLeft <= 0) {
+        finish(tally);
+      } else {
+        requestPage(true);
+      }
+    }
+
+    window.addHook('factionChatDataAvailable', onPage);
+    requestPage(false);
+  };
+
+  thisplugin.buildRealActivityBodyHTML = function () {
+    if (thisplugin.myActivityState === 'error') {
+      return '<p class="plugin_fanfields3_warn">Could not read Comm data (requires the Faction channel).</p>';
+    }
+    if (thisplugin.myActivityState !== 'done') {
+      return '<p class="plugin_fanfields3_italic">Loading…</p>';
+    }
+    return '<table><tr><td>Links thrown:</td><td>' + thisplugin.myActivityToday.links + '</td></tr>' +
+      '<tr><td>Fields created:</td><td>' + thisplugin.myActivityToday.fields + '</td></tr></table>';
+  };
+
+  thisplugin.buildRealActivityHTML = function () {
+    return '<hr noshade><div class="plugin_fanfields3_activity">' +
+      '<div class="plugin_fanfields3_activity_title">Your activity today (from Comm)</div>' +
+      '<div id="plugin_fanfields3_activity_body">' + thisplugin.buildRealActivityBodyHTML() + '</div>' +
+      '<div class="plugin_fanfields3_activity_buttons"><a href="#" id="plugin_fanfields3_activity_refresh">Refresh</a></div>' +
+      '</div>';
   };
 
   // Statistics dialog: build the HTML for the current plan. Used both to open the dialog and
@@ -1598,9 +1661,9 @@ function wrapper(plugin_info) {
   thisplugin.wireStatisticsHandlers = function () {
     $('#plugin_fanfields3_statistics_inner')
       .off('click.plugin_fanfields3_activity')
-      .on('click.plugin_fanfields3_activity', '.plugin_fanfields3_activity_btn', function () {
-        thisplugin.statsActivityWindow = $(this).attr('data-window');
-        thisplugin.refreshStatisticsDialog();
+      .on('click.plugin_fanfields3_activity', '#plugin_fanfields3_activity_refresh', function (ev) {
+        ev.preventDefault();
+        thisplugin.refreshMyActivityToday();
       });
   };
 
@@ -1673,6 +1736,7 @@ function wrapper(plugin_info) {
     }
 
     thisplugin.wireStatisticsHandlers();
+    thisplugin.refreshMyActivityToday();
   }
 
   thisplugin.exportTasks = function () {
@@ -4918,7 +4982,7 @@ function wrapper(plugin_info) {
     );
 
     // Statistics dialog: the real-activity section (links/fields actually seen in Intel within
-    // the chosen trailing window) and its Today/2 days/7 days toggle buttons.
+    // the player's own Comm activity, and its Refresh link.
     addCSS('\n' +
       '.plugin_fanfields3_activity_title {\n' +
       '  font-weight: bold;\n' +
@@ -4926,17 +4990,6 @@ function wrapper(plugin_info) {
       '}\n' +
       '.plugin_fanfields3_activity_buttons {\n' +
       '  margin-top: 6px;\n' +
-      '  display: flex;\n' +
-      '  gap: 4px;\n' +
-      '}\n' +
-      '.plugin_fanfields3_activity_btn {\n' +
-      '  flex: 1 1 auto;\n' +
-      '  cursor: pointer;\n' +
-      '}\n' +
-      '.plugin_fanfields3_activity_btn_active {\n' +
-      '  font-weight: bold;\n' +
-      '  box-shadow: 0 0 0 2px #ffce00 inset;\n' +
-      '  color: #ffce00;\n' +
       '}\n'
     );
 
@@ -9594,9 +9647,11 @@ function wrapper(plugin_info) {
     });
 
     // Keep an open Task List or Statistics dialog current between plan recalculations —
-    // available key counts (LiveInventory/Keys plugin), in-game link/portal completion and the
-    // Statistics dialog's own real-activity counts (straight from INTEL) can all change on
-    // their own timeline, not just when this plugin recomputes the plan. Refreshes live game
+    // available key counts (LiveInventory/Keys plugin) and in-game link/portal completion can
+    // change on their own timeline, not just when this plugin recomputes the plan (the
+    // Statistics dialog's own "Your activity today" section refreshes separately, on its own
+    // Refresh link — see thisplugin.refreshMyActivityToday — since it needs a Comm request,
+    // not just a repaint from data already on hand). Refreshes live game
     // data (thisplugin.locations/intelLinks) itself first, rather than only repainting from
     // whatever a mapDataRefreshEnd/requestFinished hook last put there: on some platforms
     // (observed on IITC Mobile) IITC's own map updates without those hooks ever firing for
