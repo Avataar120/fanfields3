@@ -949,6 +949,14 @@ function wrapper(plugin_info) {
     thisplugin.ensureOutboundPositionTracking();
     if (thisplugin.outboundPlayerPosition) {
       before = thisplugin.orderPrefixForOutbound(before, anchor, after, thisplugin.outboundPlayerPosition.latlng);
+      // Whatever "Less walking" (computeDistanceOrderReordering) decided for this segment is
+      // entirely superseded by the reorder just above — every portal in it was just placed by
+      // orderPrefixForOutbound's own search, not by that earlier relocation. Dropping them from
+      // relocatedForLessWalkingGuids here stops the Task List from flagging (green, "capture
+      // early") a portal based on a position it no longer actually has.
+      if (Object.keys(thisplugin.relocatedForLessWalkingGuids).length) {
+        before.forEach(function (fp) { delete thisplugin.relocatedForLessWalkingGuids[fp.guid]; });
+      }
     }
     // No cached position yet: ensureOutboundPositionTracking() above has a fetch under way and
     // redraws once it resolves — leave this segment in its natural order meanwhile.
@@ -5373,11 +5381,23 @@ function wrapper(plugin_info) {
   // Throwing a link spends a key to its destination portal. A link's own Ingress GUID (the key
   // IITC itself uses in window.links/thisplugin.intelLinks) uniquely and permanently identifies
   // that one throw — destroying and re-throwing between the same two portals later gets a brand
-  // new GUID — so thisplugin.chargedLinkGuids (persisted to localStorage, see
-  // loadChargedLinkGuids/markLinkGuidsCharged) remembers every own-faction link GUID already
-  // charged a key for, across reloads AND across IITC being closed entirely: a link thrown while
-  // IITC wasn't even running still gets its key deducted as soon as it's next seen, since its
-  // GUID isn't in that persisted set yet. A GUID already in the set is never charged again.
+  // new GUID — so the charged-link set below (persisted to localStorage under a "plugin-fanfields3-"
+  // key) remembers every own-faction link GUID already charged a key for, across reloads AND
+  // across IITC being closed entirely: a link thrown while IITC wasn't even running still gets
+  // its key deducted as soon as it's next seen, since its GUID isn't in that persisted set yet.
+  // A GUID already in the set is never charged again.
+  //
+  // Cross-device: this plugin does no syncing of its own — any "plugin-*" localStorage key is
+  // exactly what the separate Simple Cloud Sync plugin (window.plugin.simpleCloudSync, see
+  // https://github.com/Avataar120/IITC-Synchro) already syncs end-to-end encrypted across an
+  // agent's devices, merging per key by most-recent-write. For that merge to actually end up
+  // with the union of both devices' charges rather than one overwriting the other, every read
+  // and write here goes straight to localStorage — never a value cached in memory across calls
+  // — so a set just pulled down from another device is always the starting point for the next
+  // write, not something a stale in-memory copy could clobber. See
+  // thisplugin.isCrossDeviceSyncPending for the one place this still isn't enough on its own
+  // (a brand new device's very first run).
+  //
   // Evaluated only once IITC has fully finished loading the map (thisplugin._mapDataLoading):
   // while it's still streaming in link data tile by tile, an own link simply hasn't appeared
   // yet rather than not existing, so waiting avoids treating an incomplete view as if every link
@@ -5397,46 +5417,70 @@ function wrapper(plugin_info) {
   // portals — an acceptable trade-off against unbounded storage growth.
   thisplugin.CHARGED_LINKS_MAX = 20000;
 
-  thisplugin._chargedLinkGuidSet = null;
-  thisplugin._chargedLinkGuidOrder = null;
-
-  thisplugin.loadChargedLinkGuids = function () {
-    if (thisplugin._chargedLinkGuidSet) return;
-    var stored = [];
+  // The charged-link set exactly as currently stored, fetched fresh every time (see the
+  // cross-device note above) — never memoized, so a value Simple Cloud Sync just wrote into
+  // localStorage from another device is always picked up on the very next check.
+  thisplugin.getChargedLinkGuids = function () {
     try {
       var raw = localStorage.getItem(thisplugin.CHARGED_LINKS_STORAGE_KEY);
-      stored = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(stored)) stored = [];
+      var stored = raw ? JSON.parse(raw) : [];
+      return Array.isArray(stored) ? stored : [];
     } catch (e) {
-      stored = [];
+      return [];
     }
-    thisplugin._chargedLinkGuidOrder = stored;
-    thisplugin._chargedLinkGuidSet = new Set(stored);
   };
 
+  // Adds guids to the charged-link set, merging into whatever is CURRENTLY in localStorage
+  // (read fresh, not a cached copy) rather than overwriting it with an older in-memory version —
+  // the only thing that keeps this safe to write from a device that hasn't just pulled in
+  // another device's own additions via Simple Cloud Sync.
   thisplugin.markLinkGuidsCharged = function (guids) {
     if (!guids.length) return;
-    thisplugin.loadChargedLinkGuids();
-
+    var current = thisplugin.getChargedLinkGuids();
+    var set = new Set(current);
+    var added = false;
     guids.forEach(function (guid) {
-      if (thisplugin._chargedLinkGuidSet.has(guid)) return;
-      thisplugin._chargedLinkGuidSet.add(guid);
-      thisplugin._chargedLinkGuidOrder.push(guid);
+      if (set.has(guid)) return;
+      set.add(guid);
+      current.push(guid);
+      added = true;
     });
-    if (thisplugin._chargedLinkGuidOrder.length > thisplugin.CHARGED_LINKS_MAX) {
-      thisplugin._chargedLinkGuidOrder.splice(0, thisplugin._chargedLinkGuidOrder.length - thisplugin.CHARGED_LINKS_MAX)
-        .forEach(function (guid) { thisplugin._chargedLinkGuidSet.delete(guid); });
+    if (!added) return;
+    if (current.length > thisplugin.CHARGED_LINKS_MAX) {
+      current.splice(0, current.length - thisplugin.CHARGED_LINKS_MAX);
     }
     try {
-      localStorage.setItem(thisplugin.CHARGED_LINKS_STORAGE_KEY, JSON.stringify(thisplugin._chargedLinkGuidOrder));
+      localStorage.setItem(thisplugin.CHARGED_LINKS_STORAGE_KEY, JSON.stringify(current));
     } catch (e) { /* storage full or unavailable: charging still works for this session */ }
+  };
+
+  // How long after this plugin loads to still treat Simple Cloud Sync's own first pull as
+  // possibly still in flight — see isCrossDeviceSyncPending. Bounded so a Simple Cloud Sync
+  // install that's present but never configured (no password entered yet) doesn't block the
+  // very first seeding below forever.
+  thisplugin.CROSS_DEVICE_SYNC_GRACE_MS = 15000;
+  thisplugin._loadedAt = Date.now();
+
+  // Whether the one-time "seed the charged-link set" decision below should still wait: Simple
+  // Cloud Sync (window.plugin.simpleCloudSync, a separate plugin — see the note above) may
+  // still be pulling down an already-charged set from this same agent's other devices, and
+  // seeding from an empty/incomplete local set here would both miss those already-charged
+  // links and, once Simple Cloud Sync's own pull lands, look like a local edit that needs
+  // pushing — overwriting the real synced data with this device's wrong, premature guess.
+  // simpleCloudSync.initialSyncPending is a plain property on its own plugin namespace (same
+  // way this file already reads window.plugin.keys.keys directly), cleared for good the moment
+  // its first sync of this page load completes.
+  thisplugin.isCrossDeviceSyncPending = function () {
+    var scs = window.plugin.simpleCloudSync;
+    if (!scs || !scs.initialSyncPending) return false;
+    return (Date.now() - thisplugin._loadedAt) < thisplugin.CROSS_DEVICE_SYNC_GRACE_MS;
   };
 
   thisplugin.chargeNewlyThrownLinks = function (ownLinks) {
     if (thisplugin._mapDataLoading) return;
-    thisplugin.loadChargedLinkGuids();
 
     if (localStorage.getItem(thisplugin.CHARGING_INITIALIZED_KEY) !== '1') {
+      if (thisplugin.isCrossDeviceSyncPending()) return; // retried on the next indexOwnLinks() call
       // First time ever on this browser: everything already in-game was thrown before this
       // feature started tracking it, so it's seeded as already-charged rather than charged now.
       thisplugin.markLinkGuidsCharged(ownLinks.map(function (o) { return o.linkGuid; }));
@@ -5449,9 +5493,10 @@ function wrapper(plugin_info) {
     if (!thisplugin.consumeKeysOnLinkThrown) return;
     if (!window.plugin.keys || typeof window.plugin.keys.addKey !== 'function') return;
 
+    var charged = new Set(thisplugin.getChargedLinkGuids());
     var newlyCharged = [];
     ownLinks.forEach(function (o) {
-      if (thisplugin._chargedLinkGuidSet.has(o.linkGuid)) return;
+      if (charged.has(o.linkGuid)) return;
       var current = window.plugin.keys.keys[o.destGuid] || 0;
       if (current > 0) window.plugin.keys.addKey(-1, o.destGuid);
       newlyCharged.push(o.linkGuid);
@@ -6845,6 +6890,39 @@ function wrapper(plugin_info) {
     return { incomingCount: incomingCount, invalidCount: invalidCount };
   };
 
+  // Whether `edges` (srcGuid throws to dstGuid, same shape buildLinkOrderEdges/
+  // simulateDirectedPlan use) could ever be walked in a single pass at all: throwing a link
+  // needs the target's key already in hand, so the target must be visited before the source —
+  // if that requirement forms a cycle (A needs B's key, B needs C's, C needs A's), no walk order
+  // can satisfy every one of them simultaneously, regardless of which order is tried. The base
+  // plan the core algorithm builds never has this problem on its own (every mesh link points from
+  // the later-built portal to an earlier one, and the anchor's own fan links are the only
+  // exception, so a single consistent order always exists) — only an additional directed edge on
+  // top of that, such as a candidate mesh-link flip, can introduce one. Used to veto exactly that
+  // before it's accepted (see computeDistanceOrderFlips/computeKeysOrderFlips below).
+  thisplugin.hasPrecedenceCycle = function (edges) {
+    var dependents = {}; // guid -> guids that need ITS key before they can throw (visited after it)
+    edges.forEach(function (e) {
+      (dependents[e.dstGuid] = dependents[e.dstGuid] || []).push(e.srcGuid);
+    });
+
+    var state = {}; // 0/unset: unvisited, 1: on the current path, 2: fully resolved, no cycle through it
+    var cycleFound = false;
+
+    function visit(guid) {
+      if (cycleFound || state[guid] === 2) return;
+      if (state[guid] === 1) { cycleFound = true; return; }
+      state[guid] = 1;
+      (dependents[guid] || []).forEach(visit);
+      if (!cycleFound) state[guid] = 2;
+    }
+
+    Object.keys(dependents).forEach(function (guid) {
+      if (!cycleFound) visit(guid);
+    });
+    return cycleFound;
+  };
+
   // "Less walking": a portal whose own OUTGOING count is exactly 2 (its anchor link plus one
   // mesh link) is a candidate. Its mesh link flips to point AT it (mesh partner -> portal)
   // when visiting it between its own walk neighbors (whichever portals come right before and
@@ -6899,6 +6977,14 @@ function wrapper(plugin_info) {
 
     // Portals whose mesh link actually flips below — these are the ones relocated further down.
     var meshFlippedGuids = {};
+    // Candidates whose detour cost was a plain triangle-inequality number (every one except a
+    // "last in the walk, nothing to route around" candidate, forced through unconditionally and
+    // marked Infinity here so the verification pass below never second-guesses it) — see
+    // isMoveWorthwhile for how this is used once the actual insertion point is known.
+    var savingsByGuid = {};
+    // Which edge (by key) a given guid's mesh link flip touched, so a candidate that turns out
+    // not to pay off (see below) can have that flip undone, not just its walk position.
+    var flippedEdgeKeyByGuid = {};
 
     // Mesh links: only the current thrower can qualify (its own 2 outgoing links are the fan
     // link plus exactly this one mesh link) — flip it to point at the thrower only if visiting
@@ -6914,21 +7000,23 @@ function wrapper(plugin_info) {
       var nextFp = sorted[indexByGuid[e.srcGuid] + 1];
 
       var shouldFlip;
-      var direct;
+      var detourCost;
       if (nextFp) {
         // Triangle inequality on the portal's own neighbors: visiting it (prevFp -> src ->
         // nextFp) only "costs" something over skipping it (prevFp -> nextFp direct) when it's
         // really a detour. A margin avoids flipping over floating-point noise on three
         // near-collinear portals, where there's nothing to gain either way.
         var viaSrc = dist(prevFp.guid, e.srcGuid) + dist(e.srcGuid, nextFp.guid);
-        direct = dist(prevFp.guid, nextFp.guid);
-        shouldFlip = viaSrc > direct + 1e-6;
+        var direct = dist(prevFp.guid, nextFp.guid);
+        detourCost = viaSrc - direct;
+        shouldFlip = detourCost > 1e-6;
       } else {
         // Last portal in the walk: there's no "next" to route around, so it's never really "on
         // the way" to anything — let it through to the feasibility check below, same as any
         // other candidate. Worst case, the reordering step's cheapest insertion puts it right
         // back at the end, same as leaving it unflipped would have.
         shouldFlip = true;
+        detourCost = Infinity;
       }
 
       var partnerIsDegreeOne = outgoingCountByGuid[e.dstGuid] === 1;
@@ -6946,8 +7034,11 @@ function wrapper(plugin_info) {
       });
       var after = thisplugin.simulateDirectedPlan(trial);
       if (after.invalidCount > before.invalidCount) return; // required for feasibility, keep as-is
+      if (thisplugin.hasPrecedenceCycle(trial)) return; // would make no walk order satisfy every key dependency
 
       meshFlippedGuids[e.srcGuid] = true;
+      savingsByGuid[e.srcGuid] = detourCost;
+      flippedEdgeKeyByGuid[e.srcGuid] = e.key;
       e.srcGuid = desiredSrc;
       e.dstGuid = desiredDst;
     });
@@ -6967,28 +7058,79 @@ function wrapper(plugin_info) {
       var nextFp = sorted[indexByGuid[fp.guid] + 1];
 
       var shouldRelocate;
+      var detourCost;
       if (nextFp) {
         var viaSrc = dist(prevFp.guid, fp.guid) + dist(fp.guid, nextFp.guid);
         var direct = dist(prevFp.guid, nextFp.guid);
-        shouldRelocate = viaSrc > direct + 1e-6;
+        detourCost = viaSrc - direct;
+        shouldRelocate = detourCost > 1e-6;
       } else {
         shouldRelocate = true;
+        detourCost = Infinity;
       }
-      if (shouldRelocate) meshFlippedGuids[fp.guid] = true;
+      if (shouldRelocate) {
+        meshFlippedGuids[fp.guid] = true;
+        savingsByGuid[fp.guid] = detourCost;
+      }
     });
-
-    var flips = thisplugin.flipsFromDirections(current, naturalByKey);
 
     // Every portal that throws a link AT a given guid, in the final (post-flip) direction —
     // used by computeDistanceOrderReordering so a relocated portal never lands in the walk
     // after something that needs it already captured.
-    var incomingSourcesByGuid = {};
-    current.forEach(function (e) {
-      (incomingSourcesByGuid[e.dstGuid] = incomingSourcesByGuid[e.dstGuid] || []).push(e.srcGuid);
-    });
+    function buildIncomingSourcesByGuid(edgeList) {
+      var map = {};
+      edgeList.forEach(function (e) {
+        (map[e.dstGuid] = map[e.dstGuid] || []).push(e.srcGuid);
+      });
+      return map;
+    }
 
-    // Relocate each flipped portal into the walk/display order.
-    var reorderResult = thisplugin.computeDistanceOrderReordering(meshFlippedGuids, incomingSourcesByGuid);
+    // Relocate each flipped/degree-one portal into the walk/display order, then check whether
+    // each one actually paid off THERE — the decisions above only ever compared a candidate
+    // against its own two immediate neighbors in the base build order, never against where
+    // computeDistanceOrderReordering's cheapest insertion actually ends up placing it, which can
+    // land somewhere the detour it avoided is smaller than the one it just created. A candidate
+    // that doesn't pay off is reverted (walk position AND, if it had one, its link flip) and the
+    // walk is rebuilt once more without it — same reasoning computeDistanceOrderFlips already
+    // applies per candidate, just checked again now that the real insertion cost is known instead
+    // of assumed.
+    function buildReorder(relocateGuids) {
+      return thisplugin.computeDistanceOrderReordering(relocateGuids, buildIncomingSourcesByGuid(current));
+    }
+
+    function insertionCost(orderGuids, guid) {
+      var idx = orderGuids.indexOf(guid);
+      var prevGuid = orderGuids[idx - 1];
+      var nextGuid = orderGuids[idx + 1];
+      if (prevGuid !== undefined && nextGuid !== undefined) {
+        return dist(prevGuid, guid) + dist(guid, nextGuid) - dist(prevGuid, nextGuid);
+      }
+      if (prevGuid !== undefined) return dist(prevGuid, guid);
+      if (nextGuid !== undefined) return dist(guid, nextGuid);
+      return 0;
+    }
+
+    var reorderResult = buildReorder(meshFlippedGuids);
+
+    if (reorderResult) {
+      var toRevert = Object.keys(reorderResult.movedGuids).filter(function (guid) {
+        return insertionCost(reorderResult.order, guid) > savingsByGuid[guid] + 1e-6;
+      });
+
+      if (toRevert.length) {
+        toRevert.forEach(function (guid) {
+          delete meshFlippedGuids[guid];
+          var edgeKey = flippedEdgeKeyByGuid[guid];
+          if (!edgeKey) return; // a degree-one relocation, no flip to undo
+          var edge = current.filter(function (e) { return e.key === edgeKey; })[0];
+          if (edge) { var tmp = edge.srcGuid; edge.srcGuid = edge.dstGuid; edge.dstGuid = tmp; }
+        });
+        reorderResult = buildReorder(meshFlippedGuids);
+      }
+    }
+
+    var flips = thisplugin.flipsFromDirections(current, naturalByKey);
+
     if (reorderResult) {
       thisplugin.displayOrderGuids = reorderResult.order;
       thisplugin.relocatedForLessWalkingGuids = reorderResult.movedGuids;
@@ -7118,6 +7260,7 @@ function wrapper(plugin_info) {
         });
         var trialState = thisplugin.simulateDirectedPlan(trial);
         if (trialState.invalidCount > state.invalidCount) return; // never trade feasibility away
+        if (thisplugin.hasPrecedenceCycle(trial)) return; // would make no walk order satisfy every key dependency
 
         var trialMax = 0;
         Object.keys(trialState.incomingCount).forEach(function (guid) {
