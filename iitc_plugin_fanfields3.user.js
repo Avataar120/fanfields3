@@ -1103,6 +1103,19 @@ function wrapper(plugin_info) {
 
     var deadline = Date.now() + thisplugin.OUTBOUND_PREFIX_ORDER_BUDGET_MS;
     var best = evaluate(seq);
+
+    // "Less walking" (computeDistanceOrderFlips/computeDistanceOrderReordering) may already have
+    // relocated some of these portals into a good order of its own before this ever runs —
+    // prefixFps arrives in exactly that order. Tried here as a second starting candidate
+    // alongside the nearest-neighbour construction above, rather than only ever starting fresh
+    // and silently discarding that earlier work; the local search below then refines whichever
+    // of the two starts out ahead. Never makes the result worse: best only changes when this
+    // candidate actually evaluates better.
+    var identitySeq = [];
+    for (var identityIdx = 0; identityIdx < m; identityIdx++) identitySeq.push(identityIdx);
+    var identityCandidate = evaluate(identitySeq);
+    if (isBetter(identityCandidate, best)) best = identityCandidate;
+
     var maxPasses = 6;
     for (var pass = 0; pass < maxPasses && Date.now() < deadline; pass++) {
       var improved = false;
