@@ -15,7 +15,6 @@
 // @homepageURL     https://github.com/Avataar120/fanfields3/
 // @depends         draw-tools@breunigs
 // @recommends      bookmarks@ZasoGD|draw-tools-plus@zaso|liveInventory@DanielOnDiordna|keys@xelio
-// @require         https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @preview         https://raw.githubusercontent.com/Avataar120/fanfields3/master/FanFields3.png
 // @match           https://intel.ingress.com/*
 // @include         https://intel.ingress.com/*
@@ -8570,17 +8569,50 @@ function wrapper(plugin_info) {
   // fields already done vs. done at this step). Mirrors test/tools/generateWalkReportPdf.py,
   // used to validate "Less walking" during development, but reading live plan state directly
   // instead of a fixture, so it always reflects exactly what's about to be walked.
+  // jsPDF isn't bundled in this file (it's sizeable, and only ever needed if "Export plan PDF"
+  // is actually used) and can't be loaded via the userscript header's @require: that's a
+  // Tampermonkey/Greasemonkey convention, read by the desktop extension managing the script --
+  // IITC Mobile injects this same file directly, with no such preprocessing, so a @require
+  // there is silently never fetched at all. Loading it as a plain <script> the first time it's
+  // needed works identically in both.
+  thisplugin.JSPDF_URL = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  thisplugin._jsPdfLoadPromise = null;
+
+  thisplugin.ensureJsPdfLoaded = function () {
+    if (window.jspdf && window.jspdf.jsPDF) return Promise.resolve();
+    if (thisplugin._jsPdfLoadPromise) return thisplugin._jsPdfLoadPromise;
+
+    thisplugin._jsPdfLoadPromise = new Promise(function (resolve, reject) {
+      var script = document.createElement('script');
+      script.src = thisplugin.JSPDF_URL;
+      script.onload = function () {
+        if (window.jspdf && window.jspdf.jsPDF) resolve();
+        else reject(new Error('loaded but window.jspdf.jsPDF is still missing'));
+      };
+      script.onerror = function () {
+        thisplugin._jsPdfLoadPromise = null; // let a later click retry instead of failing forever
+        reject(new Error('could not load the script'));
+      };
+      document.head.appendChild(script);
+    });
+    return thisplugin._jsPdfLoadPromise;
+  };
+
   thisplugin.exportPlanPdf = function () {
     var order = thisplugin.getDisplayOrder();
     if (!order || order.length < 2) {
       alert('Fan Fields 3: no plan to export yet -- draw a polygon around some portals first.');
       return;
     }
-    if (!window.jspdf || !window.jspdf.jsPDF) {
-      alert('Fan Fields 3: the PDF export library failed to load (jsPDF). Check your connection and try reloading IITC.');
-      return;
-    }
+    thisplugin.ensureJsPdfLoaded().then(function () {
+      thisplugin.renderPlanPdf(order);
+    }).catch(function (err) {
+      alert('Fan Fields 3: the PDF export library failed to load (jsPDF). Check your connection and try again.\n' + err.message);
+    });
+  };
 
+  // Does the actual rendering once jsPDF is confirmed loaded -- see exportPlanPdf above.
+  thisplugin.renderPlanPdf = function (order) {
     var walk = thisplugin.simulateWalk(order);
 
     // Every portal's own lat/lng (for the map) and title (for the text panel), keyed the same
