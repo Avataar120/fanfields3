@@ -3,8 +3,8 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.3.0.20261005
-// @description     Fork of Heistergand's Fan Fields 2 (thanks Heistergand for the original work!). Plans the largest tidy set of nested fields, and adds: walking optimization (less backtracking between portals, Destroy stops placed where they add the least walking), automatic best anchor/direction search that reuses your faction's existing links, Blockers handling in the Task List, plan locking, Pick anchor and Exclude portals on the map, a Task List that follows your progress — correctly sequencing outbound plans and rebalancing links when one gets thrown the wrong way — and can Reroute the steps left from where you stand or preview the whole walk with Walk sim, key counts read from a screen recording of your keys in Ingress (Keys plugin) or spent automatically as you throw links (now safe to use across several of your devices at once), and route export to Google Maps / Portal Route or a step-by-step plan report ("Plan details" menu). Enable from the layer chooser.
+// @version         6.3.1.20261006
+// @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the IITCSimpleSync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
 // @icon            https://raw.githubusercontent.com/Avataar120/fanfields3/master/fanfields3-32.png
@@ -25,7 +25,7 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-05-200000';
+  plugin_info.dateTimeVersion = '2026-10-06-000000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
@@ -33,6 +33,13 @@ function wrapper(plugin_info) {
 
   var arcname = (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'Arc' : '***';
   var changelog = [{
+      version: '6.3.1',
+      changes: [
+        'IMPROVE: Rewrote the plugin description into a single, clearer line about what Fan Fields 3 does.',
+        'FIX: In the step-by-step plan report, the legend\'s "Links already thrown" and "New links" swatches both showed black, since their color was set in a way that line swatch never actually displays.',
+        'FIX: The step-by-step plan report\'s field legend swatches could show up blank in a browser print preview (and when actually printed), since background colors are hidden there unless background graphics are explicitly enabled.',
+      ],
+    },{
       version: '6.3.0',
       changes: [
         'NEW: Added a "Plan details" entry to the hamburger menu, gathering three ways to review or export the current plan -- "Print route" (the Task List, printable), "Print step by step plan" (one page per portal with the links to throw there, a running total of links/fields, and a map of progress so far, saved as a file you can open or print from your phone), and "Live simulation" (the planned walk previewed on the map, portal by portal). The separate Print and Walk sim buttons previously in the Task List moved here.',
@@ -9244,8 +9251,8 @@ function wrapper(plugin_info) {
 
     var legendHtml =
       '<div class="ff3-pdf-legend">' +
-      '<div><span class="ff3-swatch-line" style="background:#333"></span>Links already thrown</div>' +
-      '<div><span class="ff3-swatch-line" style="background:#e60000"></span>New links (this step)</div>' +
+      '<div><span class="ff3-swatch-line" style="border-color:#333"></span>Links already thrown</div>' +
+      '<div><span class="ff3-swatch-line" style="border-color:#e60000"></span>New links (this step)</div>' +
       '<div><span class="ff3-swatch-box" style="background:#d6d6d6"></span>Fields already formed</div>' +
       '<div><span class="ff3-swatch-box" style="background:#ff9999"></span>New fields (this step)</div>' +
       '<div><span class="ff3-swatch-line ff3-swatch-dashed" style="border-color:#1f6feb"></span>Walked path</div>' +
@@ -9289,7 +9296,7 @@ function wrapper(plugin_info) {
       '.ff3-pdf-legend > div { display: flex; align-items: center; gap: 2mm; margin: 1mm 0; }\n' +
       '.ff3-swatch-line { display: inline-block; width: 6mm; height: 0; border-top: 1mm solid; }\n' +
       '.ff3-swatch-dashed { border-top-style: dashed; }\n' +
-      '.ff3-swatch-box { display: inline-block; width: 4mm; height: 3mm; }\n';
+      '.ff3-swatch-box { display: inline-block; width: 4mm; height: 3mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; }\n';
 
     var safeAnchor = anchorTitle.replace(/[\\/:*?"<>|]/g, '_');
     return (
