@@ -37,6 +37,7 @@ function wrapper(plugin_info) {
       changes: [
         'IMPROVE: Rewrote the plugin description into a single, clearer line about what Fan Fields 3 does.',
         'NEW: propose Simple Cloud Sync to keep devices synchronized.',
+        'NEW: The Fanfields links layer is now enabled by default the very first time the plugin runs, so the plan shows up right away without having to turn it on manually.',
         'FIX: In the step-by-step plan report, the legend\'s "Links already thrown" and "New links" swatches both showed black, since their color was set in a way that line swatch never actually displays.',
         'FIX: The step-by-step plan report\'s field legend swatches could show up blank in a browser print preview (and when actually printed), since background colors are hidden there unless background graphics are explicitly enabled.',
       ],
@@ -9897,7 +9898,11 @@ function wrapper(plugin_info) {
       if (statisticsOpen) thisplugin.refreshStatisticsDialog();
     }, 10000);
 
-    window.addLayerGroup('Fanfields links', thisplugin.linksLayerGroup, false);
+    // "true": only takes effect the very first time this layer is ever added for this browser
+    // (IITC remembers each layer's on/off state in its own localStorage from then on) -- so
+    // this only turns the plan on by default for a fresh install, without fighting a player
+    // who later switches it off themselves.
+    window.addLayerGroup('Fanfields links', thisplugin.linksLayerGroup, true);
     window.addLayerGroup('Fanfields fields', thisplugin.fieldsLayerGroup, false);
     window.addLayerGroup('Fanfields numbers', thisplugin.numbersLayerGroup, false);
 
