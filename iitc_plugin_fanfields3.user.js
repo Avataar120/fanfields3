@@ -4,7 +4,7 @@
 // @name            Fan Fields 3
 // @category        Layer
 // @version         6.3.1.20261006
-// @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the IITCSimpleSync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
+// @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
 // @icon            https://raw.githubusercontent.com/Avataar120/fanfields3/master/fanfields3-32.png
@@ -36,6 +36,7 @@ function wrapper(plugin_info) {
       version: '6.3.1',
       changes: [
         'IMPROVE: Rewrote the plugin description into a single, clearer line about what Fan Fields 3 does.',
+        'NEW: propose Simple Cloud Sync to keep devices synchronized.',
         'FIX: In the step-by-step plan report, the legend\'s "Links already thrown" and "New links" swatches both showed black, since their color was set in a way that line swatch never actually displays.',
         'FIX: The step-by-step plan report\'s field legend swatches could show up blank in a browser print preview (and when actually printed), since background colors are hidden there unless background graphics are explicitly enabled.',
       ],
@@ -1484,6 +1485,39 @@ function wrapper(plugin_info) {
         '<a href="https://github.com/Avataar120/fanfields3/issues">https://github.com/Avataar120/fanfields3/issues</a></p>',
       id: 'plugin_fanfields3_alert_help',
       title: 'Fan Fields 3 - Help',
+      width: width,
+      closeOnEscape: true
+    });
+  };
+
+  // Promotes the separate Simple Cloud Sync plugin (keeps the drawn plan, options and spent-key
+  // tracking synced across an agent's devices, end-to-end encrypted — see the charged-link
+  // tracking comments above for how this plugin already cooperates with it). Shown once right
+  // after this plugin's very first run on a browser, and again once a week after that, for as
+  // long as Simple Cloud Sync isn't actually installed — never shown once it's detected
+  // (window.plugin.simpleCloudSync).
+  thisplugin.SYNC_TIP_STORAGE_KEY = 'plugin-fanfields3-synctip-last-shown';
+  thisplugin.SYNC_TIP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+  thisplugin.SYNC_TIP_URL = 'https://raw.githubusercontent.com/IITC-CE/Community-plugins/master/dist/Avataar120/simple-cloud-sync.user.js';
+
+  thisplugin.maybeShowSyncTip = function () {
+    if (window.plugin.simpleCloudSync) return;
+
+    var lastShown = parseInt(localStorage.getItem(thisplugin.SYNC_TIP_STORAGE_KEY), 10) || 0;
+    if (Date.now() - lastShown < thisplugin.SYNC_TIP_INTERVAL_MS) return;
+
+    localStorage.setItem(thisplugin.SYNC_TIP_STORAGE_KEY, Date.now().toString());
+
+    var width = 380;
+    thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
+    if (thisplugin.MaxDialogWidth < width) width = thisplugin.MaxDialogWidth;
+
+    dialog({
+      html: '<p><b>Sync across your devices</b><br>' +
+        'Using Fan Fields 3 on more than one device? The free <i>Simple Cloud Sync</i> plugin keeps your drawn plan, options and spent-key tracking in sync across all of them — end-to-end encrypted, with full privacy guaranteed.</p>' +
+        '<p><a href="' + thisplugin.SYNC_TIP_URL + '" target="_blank">Download Simple Cloud Sync</a></p>',
+      id: 'plugin_fanfields3_alert_synctip',
+      title: 'Fan Fields 3 - Tip',
       width: width,
       closeOnEscape: true
     });
@@ -9712,6 +9746,7 @@ function wrapper(plugin_info) {
     }
 
     thisplugin.updateLockButton();
+    thisplugin.maybeShowSyncTip();
 
     //         window.pluginCreateHook('pluginBkmrksEdit');
 
