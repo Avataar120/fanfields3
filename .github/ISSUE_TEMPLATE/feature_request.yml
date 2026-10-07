@@ -1,0 +1,12 @@
+name: New feature
+description: Request a new feature
+title: "[NEW FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What you'd like to be able to do, and why.
+    validations:
+      required: true

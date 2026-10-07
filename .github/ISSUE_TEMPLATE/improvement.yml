@@ -1,0 +1,12 @@
+name: Improvement
+description: Suggest an improvement to an existing feature
+title: "[IMPROVEMENT] "
+labels: ["improvement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should be improved, and why.
+    validations:
+      required: true

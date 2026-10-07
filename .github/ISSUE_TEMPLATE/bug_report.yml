@@ -1,0 +1,33 @@
+name: Bug
+description: Report something that isn't working as expected
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: initial-state
+    attributes:
+      label: Initial state
+      description: State of the relevant options, and any context needed to understand the situation before the issue occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: actions-taken
+    attributes:
+      label: Actions taken
+      description: What you did, step by step, to reach the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-state
+    attributes:
+      label: Expected state
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual-state
+    attributes:
+      label: Actual state
+      description: What actually happened.
+    validations:
+      required: true
