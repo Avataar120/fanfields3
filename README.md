@@ -17,6 +17,9 @@ Use this plugin to easily plan your fanfields. It tells you how many keys you ne
 - IITC Plugin: [Live Inventory](https://github.com/IITC-CE/Community-plugins?tab=readme-ov-file#live-inventory-by-eisfrei---fork-by-danielondiordna) by EisFrei - fork by DanielOnDiordna
 - IITC Plugin: [Portal Route](https://iitc.app/community_plugins#portal-route-by-MikeDiehn) by Mike Diehn
 
+### Recommended
+- IITC plugin: [Simple Cloud Sync](https://github.com/Avataar120/IITC-Synchro) by Avataar120 — keeps your drawn plan, options and spent-key tracking in sync across all your devices, end-to-end encrypted with full privacy guaranteed. Using Fan Fields 3 on more than one device (phone and tablet, for instance) without it means each device only ever sees its own plan and its own spent keys — that's also why "Spend keys on throw" defaults to off until Simple Cloud Sync is installed.
+
 ## Features
 - Select portals in your area by drawing a polygon around them with DrawTools, or pick an existing portal as a fixed anchor directly on the map.
 - Let the magic happen: A fanfield Plan will instantly be shown as overlay.

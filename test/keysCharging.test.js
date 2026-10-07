@@ -210,3 +210,15 @@ test('isCrossDeviceSyncPending: true while pending and within the grace period, 
   thisplugin._loadedAt = Date.now() - (thisplugin.CROSS_DEVICE_SYNC_GRACE_MS + 1);
   assert.equal(thisplugin.isCrossDeviceSyncPending(), false);
 });
+
+test('defaultConsumeKeysOnLinkThrown: false when Simple Cloud Sync is not installed', () => {
+  const { thisplugin, window } = freshSandbox();
+  delete window.plugin.simpleCloudSync;
+  assert.equal(thisplugin.defaultConsumeKeysOnLinkThrown(), false);
+});
+
+test('defaultConsumeKeysOnLinkThrown: true once Simple Cloud Sync is installed', () => {
+  const { thisplugin, window } = freshSandbox();
+  window.plugin.simpleCloudSync = { initialSyncPending: false };
+  assert.equal(thisplugin.defaultConsumeKeysOnLinkThrown(), true);
+});

@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.3.3.20261007
+// @version         6.4.0.20261007
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,18 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-07-195149';
+  plugin_info.dateTimeVersion = '2026-10-07-213059';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '6.4.0',
+      changes: [
+        'IMPROVE: "Spend keys on throw" now defaults to off instead of on when the separate Simple Cloud Sync plugin isn\'t installed.',
+      ],
+    },{
       version: '6.3.3',
       changes: [
         'IMPROVE: The tip promoting Simple Cloud Sync now only shows up to 3 times in total (right after install, then two weekly reminders) instead of indefinitely every week.',
@@ -5315,8 +5320,18 @@ function wrapper(plugin_info) {
   // into the charged set without spending anything — only links thrown from that point onward are
   // charged. Only window.plugin.keys is touched — LiveInventory is a read-only reflection of the
   // real inventory and has no such API (same restriction as thisplugin.toggleKeysPluginCount).
-  // Options dialog toggle ("Spend keys on throw"): on by default.
+  // Options dialog toggle ("Spend keys on throw"): on by default, except on a fresh install of
+  // this plugin alone -- see defaultConsumeKeysOnLinkThrown, applied in setup().
   thisplugin.consumeKeysOnLinkThrown = true;
+
+  // Defaults "Spend keys on throw" to off when the separate Simple Cloud Sync plugin isn't
+  // installed (window.plugin.simpleCloudSync, see the cross-device note above): without it,
+  // spent-key tracking never leaves this one device, which is a less safe default for an agent
+  // who hasn't installed it yet. A saved snapshot (Manage Ops/Save options as default) still
+  // overrides whatever this returns, since setup() applies it before reading that snapshot.
+  thisplugin.defaultConsumeKeysOnLinkThrown = function () {
+    return !!window.plugin.simpleCloudSync;
+  };
 
   thisplugin.CHARGED_LINKS_STORAGE_KEY = 'plugin-fanfields3-charged-link-guids';
   thisplugin.CHARGING_INITIALIZED_KEY = 'plugin-fanfields3-charging-initialized';
@@ -9349,6 +9364,11 @@ function wrapper(plugin_info) {
     } else if (ownTeamForDefault === window.TEAM_RES) {
       thisplugin.respectIntelLinksMode = thisplugin.respectIntelLinksModeENUM.RES;
     }
+
+    // Defaults "Spend keys on throw" to off when the separate Simple Cloud Sync plugin isn't
+    // installed, same reasoning and same spot as Respect Intel's own default just above: a
+    // saved snapshot (Manage Ops/Save options as default) still overrides this below.
+    thisplugin.consumeKeysOnLinkThrown = thisplugin.defaultConsumeKeysOnLinkThrown();
 
     thisplugin.applySavedOptionsDefault();
 
