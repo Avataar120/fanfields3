@@ -191,12 +191,32 @@ button:disabled { opacity: .6; cursor: default; }
 }
 .live-legend-count { font-variant-numeric: tabular-nums; font-weight: 600; }
 
+.history-chart {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.history-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  height: 140px;
+  padding-bottom: 1px;
+}
+.history-axis-tick {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1;
+  white-space: nowrap;
+}
 .history {
+  flex: 1;
   display: flex;
   align-items: flex-end;
   gap: 2px;
   height: 140px;
-  margin-top: 8px;
+  background-image: repeating-linear-gradient(to top, var(--border) 0, var(--border) 1px, transparent 1px, transparent 50%);
 }
 .history-bar {
   flex: 1;

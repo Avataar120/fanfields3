@@ -264,6 +264,39 @@ function listDays(from, to) {
   return days;
 }
 
+// Tous les jours ayant un fichier d'événements, triés, quelle que soit la plage demandée par
+// l'admin : le total de joueurs "inscrits" (voir firstSeenDayByAgent) doit remonter jusqu'au
+// tout début de l'historique pour être réellement cumulatif, pas seulement depuis `from`.
+function listAllStoredDays() {
+  let files;
+  try {
+    files = fs.readdirSync(EVENTS_DIR);
+  } catch (e) {
+    return [];
+  }
+  return files
+    .map(function (f) { return f.slice(-'.jsonl'.length) === '.jsonl' ? f.slice(0, -'.jsonl'.length) : null; })
+    .filter(function (d) { return d && DATE_RE.test(d); })
+    .sort();
+}
+
+// Jour de première apparition de chaque agent correspondant aux filtres, sur tout l'historique
+// connu. Sert à construire un total cumulé de joueurs "inscrits" jour par jour (aggregate
+// ci-dessous), qui ne peut donc que croître au fil du temps.
+function firstSeenDayByAgent(factionFilter, regionFilter) {
+  const firstSeen = new Map();
+  listAllStoredDays().forEach(function (day) {
+    readDayFile(day).forEach(function (e) {
+      if ((factionFilter === 'all' || e.faction === factionFilter) &&
+        (regionFilter === 'all' || e.region === regionFilter) &&
+        !firstSeen.has(e.agent)) {
+        firstSeen.set(e.agent, day);
+      }
+    });
+  });
+  return firstSeen;
+}
+
 function aggregate(from, to, factionFilter, regionFilter) {
   const days = listDays(from, to);
   let totalEvents = 0, totalSeconds = 0;
@@ -299,6 +332,19 @@ function aggregate(from, to, factionFilter, regionFilter) {
       }
     });
     byDay.push({ date: day, seconds: daySeconds, uniqueAgents: dayAgents.size });
+  });
+
+  // Total cumulé de joueurs "inscrits" (vus pour la première fois) jour par jour : deux
+  // pointeurs sur deux listes de dates déjà triées (byDay et les jours de première apparition),
+  // donc O(jours) et pas O(jours²).
+  const firstSeenDays = Array.from(firstSeenDayByAgent(factionFilter, regionFilter).values()).sort();
+  let firstSeenIdx = 0, registeredTotal = 0;
+  byDay.forEach(function (d) {
+    while (firstSeenIdx < firstSeenDays.length && firstSeenDays[firstSeenIdx] <= d.date) {
+      registeredTotal++;
+      firstSeenIdx++;
+    }
+    d.registeredTotal = registeredTotal;
   });
 
   return {
@@ -533,11 +579,17 @@ server.headersTimeout = 15 * 1000;
 server.requestTimeout = 30 * 1000;
 server.keepAliveTimeout = 5 * 1000;
 
-loadAdmin().then(function () {
-  server.listen(PORT, function () {
-    console.log('FanFields 3 stats en écoute sur :' + PORT);
+// Ne démarre pas le serveur HTTP (ni ne crée le compte admin) quand ce fichier est chargé par
+// `require()`, par exemple depuis un test -- seulement quand il est lancé directement.
+if (require.main === module) {
+  loadAdmin().then(function () {
+    server.listen(PORT, function () {
+      console.log('FanFields 3 stats en écoute sur :' + PORT);
+    });
+  }, function (e) {
+    console.error(e);
+    process.exit(1);
   });
-}, function (e) {
-  console.error(e);
-  process.exit(1);
-});
+}
+
+module.exports = { aggregate: aggregate, appendEvent: appendEvent, EVENTS_DIR: EVENTS_DIR };

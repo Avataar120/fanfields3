@@ -172,17 +172,39 @@
     });
   }
 
-  function renderHistory(byDay) {
-    const box = $('history');
+  // Shared renderer for the "Active time per day" and "Registered players" bar charts: both
+  // are a row of day bars scaled to their own max, with a left-hand axis showing 3 ticks
+  // (max, max/2, 0) lined up with the .history gridlines (50% steps).
+  function renderBarChart(boxId, axisId, byDay, valueOf, formatValue, titleOf) {
+    const box = $(boxId);
+    const axis = $(axisId);
     box.textContent = '';
+    axis.textContent = '';
     if (!byDay.length) { box.appendChild(el('p', 'history-empty', 'No data for this range.')); return; }
-    const max = byDay.reduce(function (m, d) { return Math.max(m, d.seconds); }, 0) || 1;
+    const max = byDay.reduce(function (m, d) { return Math.max(m, valueOf(d)); }, 0) || 1;
+    [max, max / 2, 0].forEach(function (v) {
+      axis.appendChild(el('div', 'history-axis-tick', formatValue(v)));
+    });
     byDay.forEach(function (d) {
       const bar = el('div', 'history-bar');
-      bar.style.height = Math.max(2, (d.seconds / max) * 100) + '%';
-      bar.title = formatDay(d.date) + ' : ' + formatHours(d.seconds) + ', ' + d.uniqueAgents + ' agent(s)';
+      bar.style.height = Math.max(2, (valueOf(d) / max) * 100) + '%';
+      bar.title = titleOf(d);
       box.appendChild(bar);
     });
+  }
+
+  function renderHistory(byDay) {
+    renderBarChart('history', 'historyAxis', byDay,
+      function (d) { return d.seconds; },
+      formatHours,
+      function (d) { return formatDay(d.date) + ' : ' + formatHours(d.seconds) + ', ' + d.uniqueAgents + ' agent(s)'; });
+  }
+
+  function renderRegistered(byDay) {
+    renderBarChart('registered', 'registeredAxis', byDay,
+      function (d) { return d.registeredTotal; },
+      function (v) { return String(Math.round(v)); },
+      function (d) { return formatDay(d.date) + ' : ' + d.registeredTotal + ' player(s)'; });
   }
 
   function renderBreakdown(containerId, rows, labelFor, cls) {
@@ -216,6 +238,7 @@
       $('whoami').textContent = res.admin.user;
       renderStats(res);
       renderHistory(res.byDay);
+      renderRegistered(res.byDay);
       renderBreakdown('byFaction', res.byFaction, function (r) { return r.faction === 'ENL' ? 'Enlightened' : 'Resistance'; },
         function (r) { return r.faction === 'ENL' ? 'enl' : 'res'; });
       renderBreakdown('byRegion', res.byRegion, function (r) { return REGION_LABELS[r.region] || r.region; });
