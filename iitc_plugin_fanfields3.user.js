@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.3.2.20261007
+// @version         6.3.3.20261007
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,18 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-07-190930';
+  plugin_info.dateTimeVersion = '2026-10-07-195149';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '6.3.3',
+      changes: [
+        'IMPROVE: The tip promoting Simple Cloud Sync now only shows up to 3 times in total (right after install, then two weekly reminders) instead of indefinitely every week.',
+      ],
+    },{
       version: '6.3.2',
       changes: [
         'FIX: The changelog now starts at 2.8.3, the version this plugin forked from Heistergand\'s Fan Fields 2, instead of listing changes that belong to the original plugin.',
@@ -1101,20 +1106,26 @@ function wrapper(plugin_info) {
   // Promotes the separate Simple Cloud Sync plugin (keeps the drawn plan, options and spent-key
   // tracking synced across an agent's devices, end-to-end encrypted — see the charged-link
   // tracking comments above for how this plugin already cooperates with it). Shown once right
-  // after this plugin's very first run on a browser, and again once a week after that, for as
-  // long as Simple Cloud Sync isn't actually installed — never shown once it's detected
-  // (window.plugin.simpleCloudSync).
+  // after this plugin's very first run on a browser, then again once a week after that, up to
+  // a total of 3 times (install + 2 weekly reminders) — never shown once it's detected
+  // (window.plugin.simpleCloudSync), and never again past that count.
   thisplugin.SYNC_TIP_STORAGE_KEY = 'plugin-fanfields3-synctip-last-shown';
+  thisplugin.SYNC_TIP_COUNT_STORAGE_KEY = 'plugin-fanfields3-synctip-shown-count';
   thisplugin.SYNC_TIP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+  thisplugin.SYNC_TIP_MAX_SHOWN = 3;
   thisplugin.SYNC_TIP_URL = 'https://raw.githubusercontent.com/IITC-CE/Community-plugins/master/dist/Avataar120/simple-cloud-sync.user.js';
 
   thisplugin.maybeShowSyncTip = function () {
     if (window.plugin.simpleCloudSync) return;
 
+    var shownCount = parseInt(localStorage.getItem(thisplugin.SYNC_TIP_COUNT_STORAGE_KEY), 10) || 0;
+    if (shownCount >= thisplugin.SYNC_TIP_MAX_SHOWN) return;
+
     var lastShown = parseInt(localStorage.getItem(thisplugin.SYNC_TIP_STORAGE_KEY), 10) || 0;
     if (Date.now() - lastShown < thisplugin.SYNC_TIP_INTERVAL_MS) return;
 
     localStorage.setItem(thisplugin.SYNC_TIP_STORAGE_KEY, Date.now().toString());
+    localStorage.setItem(thisplugin.SYNC_TIP_COUNT_STORAGE_KEY, (shownCount + 1).toString());
 
     var width = 380;
     thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
