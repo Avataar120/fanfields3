@@ -161,7 +161,22 @@ function createLeafletStub() {
 // (not setup()/DOM-building code, which individual tests stub further if they need it) might
 // reach through helpers. Chaining always returns an object with every method a test or the
 // plugin might call, each a no-op unless noted.
+//
+// append() additionally parses a bare id="..." and title="..." off any HTML string it's given
+// and records them in `registry` (exposed as the returned jq function's own `__registry`), and
+// find('#someId') returns a live handle into that same registry entry instead of an inert stub --
+// just enough for a test to build a real control (e.g. thisplugin.ffButtons().onAdd(map)) and
+// then assert on an attribute a later find(...).removeAttr(...) call stripped from one of its
+// appended elements.
 function createJqueryStub() {
+  const registry = new Map(); // id -> { title: string|undefined }
+
+  function parseAttrs(html) {
+    const idMatch = /\sid="([^"]*)"/.exec(html);
+    const titleMatch = /\stitle="([^"]*)"/.exec(html);
+    return { id: idMatch ? idMatch[1] : null, title: titleMatch ? titleMatch[1] : undefined };
+  }
+
   function jq() {
     const el = {
       length: 0,
@@ -173,8 +188,26 @@ function createJqueryStub() {
       text() { return el; },
       html() { return el; },
       css() { return el; },
-      find() { return jq(); },
-      append() { return el; },
+      find(selector) {
+        if (typeof selector === 'string' && selector[0] === '#') {
+          const entry = registry.get(selector.slice(1));
+          if (entry) {
+            return {
+              length: 1,
+              attr(name) { return name === 'title' ? entry.title : undefined; },
+              removeAttr(name) { if (name === 'title') delete entry.title; return this; }
+            };
+          }
+        }
+        return jq();
+      },
+      append(html) {
+        if (typeof html === 'string') {
+          const { id, title } = parseAttrs(html);
+          if (id) registry.set(id, { title });
+        }
+        return el;
+      },
       prepend() { return el; },
       empty() { return el; },
       remove() { return el; },
@@ -189,6 +222,7 @@ function createJqueryStub() {
     return el;
   }
   jq.extend = Object.assign;
+  jq.__registry = registry;
   // jQuery.each: object form calls back(key, value) for own enumerable keys, array form
   // calls back(index, value) -- same signature the plugin's own $.each(window.portals, ...)
   // and $.each(donelinks, ...) calls rely on.

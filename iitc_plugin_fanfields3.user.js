@@ -8601,6 +8601,13 @@ function wrapper(plugin_info) {
             thisplugin.showMainMenu(this);
           });
 
+        // On mobile, the title attribute pops up a native tooltip on tap instead of just
+        // registering the tap -- strip it there so touch stays a plain tap. Desktop keeps
+        // its hover tooltip.
+        if (L && L.Browser && L.Browser.mobile) {
+          $(container).find('#fanfieldMenuButton').removeAttr('title');
+        }
+
         $(container)
           .append(
             '<a id="fanfieldTaskListButton" href="javascript: void(0);" class="fanfields-control" title="Fan Fields 3 - Task List">' +
