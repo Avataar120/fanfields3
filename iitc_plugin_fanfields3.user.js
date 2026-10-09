@@ -8726,7 +8726,15 @@ function wrapper(plugin_info) {
       { label: 'Pick&nbsp;anchor', action: thisplugin.toggleAnchorPicking },
       { label: 'Stats', action: thisplugin.showStatistics },
       { label: 'Options', action: thisplugin.showOptionsDialog },
-      { label: 'Help', action: thisplugin.help }
+      { label: 'Help', action: thisplugin.help },
+      { label: 'Give&nbsp;me&nbsp;a&nbsp;star', action: function () {
+          window.open('https://github.com/Avataar120/fanfields3', '_blank');
+        }
+      },
+      { label: 'Report&nbsp;a&nbsp;bug', action: function () {
+          window.open('https://github.com/Avataar120/fanfields3/issues', '_blank');
+        }
+      }
     ];
 
     var rect = anchorEl.getBoundingClientRect();

@@ -256,6 +256,14 @@ function createPluginSandbox() {
     fields: {},
     escapeHtmlSpecialChars(s) { return String(s); },
     formatDistance(d) { return d + ' m'; },
+    // Records every window.open(url, target) call (e.g. the hamburger menu's "Give me a
+    // star"/"Report a bug" entries) so a test can assert on it, instead of actually opening
+    // a browser window/tab.
+    _opened: [],
+    open(url, target) {
+      sandboxWindow._opened.push({ url, target });
+      return null;
+    },
     // A real, minimal pub/sub (not a no-op): thisplugin.refreshMyActivityToday both registers
     // and later removes its own per-channel listener, and a test needs to actually invoke a
     // registered callback to simulate a Comm page arriving -- a no-op addHook couldn't support
