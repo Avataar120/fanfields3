@@ -198,6 +198,47 @@
       function (d) { return d.seconds; },
       formatHours,
       function (d) { return formatDay(d.date) + ' : ' + formatHours(d.seconds) + ', ' + d.uniqueAgents + ' agent(s)'; });
+    renderHistoryLine(byDay);
+  }
+
+  // Overlays the "active agents per day" line on the history bar chart, with its own
+  // right-hand axis. The connecting line is an SVG polyline stretched to fill its box
+  // (non-uniform scaling distorts its angle a little, which is an acceptable tradeoff for
+  // a small trend line); the dots are plain positioned divs so they stay round.
+  function renderHistoryLine(byDay) {
+    const axis = $('historyAxisRight');
+    const layer = $('historyLineLayer');
+    axis.textContent = '';
+    layer.textContent = '';
+    if (!byDay.length) return;
+    const max = byDay.reduce(function (m, d) { return Math.max(m, d.uniqueAgents); }, 0) || 1;
+    [max, max / 2, 0].forEach(function (v) {
+      axis.appendChild(el('div', 'history-axis-tick', String(Math.round(v))));
+    });
+
+    const n = byDay.length;
+    const points = byDay.map(function (d, i) {
+      return { x: n === 1 ? 50 : (i / (n - 1)) * 100, y: 100 - (d.uniqueAgents / max) * 100, d: d };
+    });
+
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('class', 'history-line-svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    const polyline = document.createElementNS(svgNs, 'polyline');
+    polyline.setAttribute('class', 'history-line-path');
+    polyline.setAttribute('points', points.map(function (p) { return p.x + ',' + p.y; }).join(' '));
+    svg.appendChild(polyline);
+    layer.appendChild(svg);
+
+    points.forEach(function (p) {
+      const dot = el('div', 'history-line-dot');
+      dot.style.left = p.x + '%';
+      dot.style.bottom = (100 - p.y) + '%';
+      dot.title = formatDay(p.d.date) + ' : ' + p.d.uniqueAgents + ' agent(s)';
+      layer.appendChild(dot);
+    });
   }
 
   function renderRegistered(byDay) {

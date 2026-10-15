@@ -12,6 +12,7 @@
   --enl: #2ecc71;
   --res: #3b8ee0;
   --danger: #c0392b;
+  --line-agents: #eb6834;
   --radius: 10px;
   color-scheme: light;
 }
@@ -31,6 +32,7 @@
     --enl: #48e08a;
     --res: #5aa7ec;
     --danger: #ef6b5b;
+    --line-agents: #d95926;
     color-scheme: dark;
   }
 }
@@ -210,12 +212,18 @@ button:disabled { opacity: .6; cursor: default; }
   line-height: 1;
   white-space: nowrap;
 }
-.history {
+.history-axis-right { align-items: flex-start; }
+.history-plot {
   flex: 1;
+  position: relative;
+  height: 140px;
+}
+.history {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  height: 140px;
   background-image: repeating-linear-gradient(to top, var(--border) 0, var(--border) 1px, transparent 1px, transparent 50%);
 }
 .history-bar {
@@ -227,6 +235,55 @@ button:disabled { opacity: .6; cursor: default; }
 }
 .history-bar:hover { opacity: .8; }
 .history-empty { color: var(--muted); }
+
+.history-line-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.history-line-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  display: block;
+}
+.history-line-path {
+  fill: none;
+  stroke: var(--line-agents);
+  stroke-width: 2px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.history-line-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  margin-bottom: -3px;
+  border-radius: 50%;
+  background: var(--line-agents);
+  box-shadow: 0 0 0 1.5px var(--surface);
+  pointer-events: auto;
+}
+
+.history-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.history-legend-item { display: flex; align-items: center; gap: 6px; }
+.history-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.history-legend-swatch-bar { background: var(--bar); }
+.history-legend-swatch-line { background: var(--line-agents); border-radius: 50%; }
 
 .breakdown-row {
   display: grid;

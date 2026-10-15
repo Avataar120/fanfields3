@@ -278,9 +278,17 @@
 
       <div class="card">
         <h2>Active time per day</h2>
+        <div class="history-legend">
+          <span class="history-legend-item"><span class="history-legend-swatch history-legend-swatch-bar"></span>Active time (h)</span>
+          <span class="history-legend-item"><span class="history-legend-swatch history-legend-swatch-line"></span>Active agents</span>
+        </div>
         <div class="history-chart">
           <div class="history-axis" id="historyAxis"></div>
-          <div class="history" id="history"></div>
+          <div class="history-plot">
+            <div class="history" id="history"></div>
+            <div class="history-line-layer" id="historyLineLayer"></div>
+          </div>
+          <div class="history-axis history-axis-right" id="historyAxisRight"></div>
         </div>
       </div>
 
@@ -288,7 +296,9 @@
         <h2>Registered players</h2>
         <div class="history-chart">
           <div class="history-axis" id="registeredAxis"></div>
-          <div class="history" id="registered"></div>
+          <div class="history-plot">
+            <div class="history" id="registered"></div>
+          </div>
         </div>
       </div>
 
