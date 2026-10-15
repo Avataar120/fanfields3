@@ -4493,6 +4493,43 @@ function wrapper(plugin_info) {
     thisplugin.delayedUpdateLayer(0.2, true);
   };
 
+  // Which kind of plan the map/sidebar controls build: the classic single-anchor fan field, or
+  // the 2-anchor herringbone (see thisplugin.buildHerringbonePlan). Toggled from the map's
+  // topleft bar (see addFfButtons) where the Shift left button used to be -- herringbone mode
+  // has no use for cycling a single anchor around the hull yet.
+  thisplugin.fieldModeENUM = {
+    FAN: 'fan',
+    HERRINGBONE: 'herringbone'
+  };
+  thisplugin.fieldMode = thisplugin.fieldModeENUM.FAN;
+
+  // Time budget for thisplugin.buildHerringbonePlan's search across candidate anchor pairs --
+  // same spirit as thisplugin.ORIENTATION_SEARCH_BUDGET_MS, but spent synchronously inside
+  // updateLayer() rather than sliced across setTimeout steps: this first version has no
+  // off-hull/manual anchor picking yet, so there's no stale-search bookkeeping to race against.
+  thisplugin.HERRINGBONE_SEARCH_BUDGET_MS = 3000;
+
+  thisplugin.toggleFieldMode = function () {
+    thisplugin.fieldMode = (thisplugin.fieldMode === thisplugin.fieldModeENUM.FAN)
+      ? thisplugin.fieldModeENUM.HERRINGBONE
+      : thisplugin.fieldModeENUM.FAN;
+    thisplugin.updateFieldModeButton();
+    thisplugin.saveOptionsDefault();
+    thisplugin.delayedUpdateLayer(0.2, true);
+  };
+
+  // Keeps the map's topleft mode button (see addFfButtons) in sync with thisplugin.fieldMode --
+  // called right after toggleFieldMode and once more at setup() once the saved default/op has
+  // actually been applied.
+  thisplugin.updateFieldModeButton = function () {
+    var isHerringbone = thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE;
+    $('#fanfieldModeToggleButton')
+      .html(isHerringbone ? symbol_herringboneMode : symbol_fanMode)
+      .attr('title', isHerringbone
+        ? 'Herringbone mode (2 anchors): click to switch to Fan field mode'
+        : 'Fan field mode (1 anchor): click to switch to Herringbone mode');
+  };
+
 
 
   thisplugin.increaseSBUL = function () {
@@ -4890,6 +4927,14 @@ function wrapper(plugin_info) {
       '  color: #ff4444;\n' +
       '}\n' +
       '.plugin_fanfields3_lock_svg {\n' +
+      '  vertical-align: middle;\n' +
+      '}\n'
+    );
+
+    // Map topleft Fan field / Herringbone mode toggle: same vertical alignment as the lock
+    // icon above, for a consistent look across the topleft bar's SVG icons.
+    addCSS('\n' +
+      '.plugin_fanfields3_mode_svg {\n' +
       '  vertical-align: middle;\n' +
       '}\n'
     );
@@ -5878,7 +5923,6 @@ function wrapper(plugin_info) {
     other_ll = map.unproject(b, thisplugin.PROJECT_ZOOM);
     return starting_ll.distanceTo(other_ll);
   }
-
 
   // Issue #96: Max distance (in meters) for creating a link from a portal that is underneath an already-existing field.
   // Historically this was 500m; Niantic increased this temporarily to 2000m (matryoshka links). Keep configurable.
@@ -7512,6 +7556,300 @@ function wrapper(plugin_info) {
     });
   };
 
+  // ---------------------------------------------------------------------
+  // Herringbone mode (thisplugin.fieldModeENUM.HERRINGBONE): a 2-anchor plan, as opposed to the
+  // fan field's single anchor. The two anchors A and B always link directly to each other, and
+  // every other portal in the plan links to BOTH anchors plus whichever such portal came right
+  // before it in the chain (nearest-reachable-next order -- see buildHerringboneChain). Each
+  // portal after the first closes 2 new fields (one on the A side, one on the B side of the link
+  // to its predecessor), which is what gives the pattern its name: a chain of triangles
+  // alternating which anchor they're attached to, like a herringbone/chevron weave.
+  //
+  // This first version always searches for the best anchor pair automatically (no manual 1- or
+  // 2-anchor picking yet -- see the plugin's own roadmap) and only draws the result; it doesn't
+  // yet feed the Task List, Statistics, blockers or walk ordering, which still assume the fan
+  // field's own sortedFanpoints shape.
+  // ---------------------------------------------------------------------
+
+  // Priority for picking the best candidate anchor pair -- the same priority
+  // thisplugin.runOrientationSearch already uses for the single fan anchor: reuse as many links
+  // already thrown in-game as possible, then build as many fields as possible, then put the
+  // fewest keys on whichever portal ends up busiest.
+  thisplugin.isBetterHerringboneScore = function (score, than) {
+    if (score.reused !== than.reused) return score.reused > than.reused;
+    if (score.fields !== than.fields) return score.fields > than.fields;
+    return score.maxKeys < than.maxKeys;
+  };
+
+  // Builds the link/field structure for one herringbone candidate, given its two fixed anchors.
+  // The chain grows one portal at a time, always picking -- among every portal not yet in the
+  // chain -- the one nearest to the current chain tail (A itself, before the chain has started)
+  // whose 3 links (to A, to B, and to that tail) wouldn't cross anything already accepted; an
+  // earlier herringbone link, or, with Respect Intel on, a real in-game link from a respected
+  // faction, counts as "already accepted" too. A portal that can't be reached from the CURRENT
+  // tail without crossing still gets reconsidered on every later step (the tail keeps moving),
+  // so it's only actually left out (excludedGuids) once nothing further can be attached at all --
+  // this is what lets the chain wind through a dense, irregular cluster of portals rather than
+  // stalling after 2 or 3 of them the moment a fixed left-to-right order would have crossed.
+  // thisplugin.buildHerringbonePlan tries every candidate anchor pair and keeps whichever one
+  // chains in the best-scoring result.
+  //
+  // Returns null if the pair can't even throw its own A-B link (Respect Intel blocks it) or
+  // there's no other portal at all to chain in. A pair whose candidates all get excluded still
+  // returns a (degenerate, chain-less) plan -- just the A-B link -- rather than null. `deadline`
+  // (a Date.now()-comparable timestamp, optional) bounds how long the search for each next
+  // portal may run -- see thisplugin.buildHerringbonePlan, which shares one deadline across every
+  // candidate anchor pair.
+  thisplugin.buildHerringboneChain = function (fanpoints, guidA, guidB, respectLinks, deadline) {
+    var pointA = fanpoints[guidA];
+    var pointB = fanpoints[guidB];
+
+    function crossesAny(line, list) {
+      for (var i = 0; i < list.length; i++) {
+        if (thisplugin.intersects(line, list[i])) return true;
+      }
+      return false;
+    }
+
+    function pointDistance(p1, p2) {
+      var dx = p1.x - p2.x, dy = p1.y - p2.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    var baseLink = { a: pointA, b: pointB, guidA: guidA, guidB: guidB, kind: 'base' };
+    if (respectLinks && crossesAny(baseLink, respectLinks)) return null;
+
+    var acceptedLinks = [baseLink];
+
+    var available = Object.keys(fanpoints).filter(function (guid) {
+      return guid !== guidA && guid !== guidB;
+    });
+    // Nothing to chain in at all (just the 2 anchors) -- there's no herringbone to speak of,
+    // as opposed to every candidate existing but getting excluded below, which still returns a
+    // (degenerate, chain-less) plan further down.
+    if (available.length === 0) return null;
+
+    var chain = [];
+    var excludedGuids = [];
+    var prevGuid = null;
+    var prevPoint = null;
+
+    while (available.length > 0) {
+      if (deadline && Date.now() > deadline) {
+        excludedGuids = excludedGuids.concat(available);
+        break;
+      }
+
+      var tailPoint = prevPoint || pointA;
+      // Nearest-first, re-sorted every step against the CURRENT tail -- not a one-shot order
+      // decided up front -- so a portal that loses out (or would cross something) early on is
+      // tried again, against a new tail, on every later step rather than being written off for
+      // good.
+      available.sort(function (gx, gy) {
+        return pointDistance(fanpoints[gx], tailPoint) - pointDistance(fanpoints[gy], tailPoint);
+      });
+
+      var pickedIndex = -1;
+      for (var ci = 0; ci < available.length; ci++) {
+        var guid = available[ci];
+        var point = fanpoints[guid];
+        var newLinks = [
+          { a: point, b: pointA, guidA: guid, guidB: guidA, kind: 'toA' },
+          { a: point, b: pointB, guidA: guid, guidB: guidB, kind: 'toB' }
+        ];
+        if (prevGuid !== null) {
+          newLinks.push({ a: point, b: prevPoint, guidA: guid, guidB: prevGuid, kind: 'chain' });
+        }
+
+        var blocked = newLinks.some(function (line) {
+          return (respectLinks && crossesAny(line, respectLinks)) || crossesAny(line, acceptedLinks);
+        });
+
+        if (!blocked) {
+          acceptedLinks = acceptedLinks.concat(newLinks);
+          chain.push({ guid: guid, point: point, prevGuid: prevGuid });
+          prevGuid = guid;
+          prevPoint = point;
+          pickedIndex = ci;
+          break;
+        }
+      }
+
+      if (pickedIndex === -1) {
+        // Nothing left can be validly attached from the current tail, and the tail only ever
+        // moves forward (never back to an earlier chain portal) -- so nothing left can ever be
+        // attached from here on either.
+        excludedGuids = excludedGuids.concat(available);
+        break;
+      }
+
+      available.splice(pickedIndex, 1);
+    }
+
+    var triangles = [];
+    if (chain.length > 0) {
+      triangles.push({ a: pointA, b: pointB, c: chain[0].point });
+      for (var i = 1; i < chain.length; i++) {
+        triangles.push({ a: pointA, b: chain[i - 1].point, c: chain[i].point });
+        triangles.push({ a: pointB, b: chain[i - 1].point, c: chain[i].point });
+      }
+    }
+
+    // Keys needed per portal = how many of these links point AT it (incoming); A and B both
+    // accumulate one per chain portal (plus B gets the base A->B link), which is why they're
+    // usually the busiest -- same "centralizing" default the fan field itself starts from.
+    var incomingCount = {};
+    var reused = 0;
+    acceptedLinks.forEach(function (link) {
+      incomingCount[link.guidB] = (incomingCount[link.guidB] || 0) + 1;
+      if (thisplugin.isLinkInGame(link.guidA, link.guidB)) reused++;
+    });
+    var maxKeys = 0;
+    Object.keys(incomingCount).forEach(function (guid) {
+      if (incomingCount[guid] > maxKeys) maxKeys = incomingCount[guid];
+    });
+
+    return {
+      anchorGuidA: guidA,
+      anchorGuidB: guidB,
+      anchorPointA: pointA,
+      anchorPointB: pointB,
+      chain: chain,
+      excludedGuids: excludedGuids,
+      links: acceptedLinks,
+      triangles: triangles,
+      score: { reused: reused, fields: triangles.length, maxKeys: maxKeys }
+    };
+  };
+
+  // Searches candidate anchor pairs (every pair of portals in `fanpoints`, farthest apart first
+  // -- in practice the pair that leaves the most room for a long, non-crossing chain) for the
+  // best-scoring herringbone (see isBetterHerringboneScore), within
+  // thisplugin.HERRINGBONE_SEARCH_BUDGET_MS -- trying every pair (not just the convex hull's)
+  // measurably finds longer chains on real, non-corridor-shaped portal clusters, and was fast
+  // enough in practice (well under a second for 76 portals) that the time budget, not a hull
+  // restriction, is what should cap the search on an unusually large selection. Returns null if
+  // there are fewer than 3 portals to plan with, or no pair produced a usable chain at all.
+  thisplugin.buildHerringbonePlan = function (fanpoints, options) {
+    options = options || {};
+    var respectLinks = options.respectLinks || null;
+    var deadline = Date.now() + thisplugin.HERRINGBONE_SEARCH_BUDGET_MS;
+
+    var guids = Object.keys(fanpoints);
+    if (guids.length < 3) return null;
+
+    // Distance computed once per pair up front (rather than repeatedly inside the sort
+    // comparator) since it's the same, fairly expensive, map.unproject-based call either way.
+    var pairs = [];
+    for (var i = 0; i < guids.length; i++) {
+      for (var j = i + 1; j < guids.length; j++) {
+        pairs.push({
+          guidA: guids[i],
+          guidB: guids[j],
+          distance: thisplugin.distanceTo(fanpoints[guids[i]], fanpoints[guids[j]])
+        });
+      }
+    }
+    pairs.sort(function (p1, p2) { return p2.distance - p1.distance; });
+
+    var best = null;
+    for (var k = 0; k < pairs.length; k++) {
+      if (Date.now() > deadline) break;
+      var candidate = thisplugin.buildHerringboneChain(fanpoints, pairs[k].guidA, pairs[k].guidB, respectLinks, deadline);
+      if (candidate && (!best || thisplugin.isBetterHerringboneScore(candidate.score, best.score))) {
+        best = candidate;
+      }
+    }
+    return best;
+  };
+
+  // Herringbone counterpart of the fan-specific block inside updateLayer() below: finds the
+  // best anchor pair/chain for the current portal set and draws it. Called from updateLayer()
+  // itself once the portal set (fanpoints) and exclusions are settled, in place of
+  // buildFanPlan/drawPlan -- see thisplugin.fieldMode.
+  thisplugin.updateHerringboneLayer = function (fanpoints, respectLinks) {
+    thisplugin.triangles = [];
+    thisplugin.donelinks = [];
+    thisplugin.links = [];
+    thisplugin.n = 0;
+    thisplugin.centerKeys = 0;
+
+    thisplugin.herringbonePlan = thisplugin.buildHerringbonePlan(fanpoints, { respectLinks: respectLinks });
+
+    if (thisplugin.herringbonePlan) {
+      thisplugin.links = thisplugin.herringbonePlan.links;
+      thisplugin.donelinks = thisplugin.herringbonePlan.links;
+      thisplugin.triangles = thisplugin.herringbonePlan.triangles;
+      thisplugin.n = thisplugin.herringbonePlan.chain.length + 2;
+    }
+
+    thisplugin.drawHerringbonePlan(thisplugin.herringbonePlan);
+  };
+
+  // Draws a herringbone plan (see buildHerringbonePlan) directly: every link in the same solid
+  // purple drawPlan uses for the fan field, every field as the same translucent red fill, and a
+  // simple ANCHOR A / ANCHOR B / 1, 2, 3… label on each portal so the chosen anchors and chain
+  // order are visible on the map. Deliberately independent from drawPlan: it doesn't touch the
+  // walk order, blockers, Task List or Statistics, which still read the fan field's own
+  // sortedFanpoints shape that herringbone mode never populates (see updateHerringboneLayer).
+  thisplugin.drawHerringbonePlan = function (plan) {
+    thisplugin.linksLayerGroup.clearLayers();
+    thisplugin.fieldsLayerGroup.clearLayers();
+    thisplugin.numbersLayerGroup.clearLayers();
+    thisplugin.clearAllPortalLabels();
+
+    if (!plan) return;
+
+    // Colored by kind (see buildHerringboneChain) rather than uniformly purple: with 2 anchors
+    // far apart and a dense cluster of chain portals in between, a single color made it very
+    // hard to tell by eye whether a given portal really links to BOTH anchors (it always does
+    // -- see the invariant buildHerringboneChain guarantees) or just looked that way from
+    // nearby, overlapping lines. Anchor A's own fan, anchor B's own fan, and the chain's own
+    // portal-to-portal links each get a distinct color instead.
+    var LINK_COLOR_BY_KIND = {
+      base: '#FFFFFF',
+      toA: '#E67E22',
+      toB: '#3498DB',
+      chain: '#8E44AD'
+    };
+
+    function drawLink(link) {
+      var alatlng = map.unproject(link.a, thisplugin.PROJECT_ZOOM);
+      var blatlng = map.unproject(link.b, thisplugin.PROJECT_ZOOM);
+      L.polyline([alatlng, blatlng], {
+        color: LINK_COLOR_BY_KIND[link.kind] || '#8E44AD',
+        opacity: 1,
+        weight: 1.5,
+        clickable: false,
+        interactive: false,
+        smoothFactor: 10
+      }).addTo(thisplugin.linksLayerGroup);
+    }
+
+    function drawField(triangle) {
+      var pts = [triangle.a, triangle.b, triangle.c].map(function (p) {
+        return map.unproject(p, thisplugin.PROJECT_ZOOM);
+      });
+      L.polygon(pts, {
+        stroke: false,
+        fill: true,
+        fillColor: '#FF0000',
+        fillOpacity: 0.1,
+        clickable: false,
+        interactive: false
+      }).addTo(thisplugin.fieldsLayerGroup);
+    }
+
+    plan.links.forEach(drawLink);
+    plan.triangles.forEach(drawField);
+
+    thisplugin.addLabel(plan.anchorGuidA, map.unproject(plan.anchorPointA, thisplugin.PROJECT_ZOOM), 'ANCHOR A');
+    thisplugin.addLabel(plan.anchorGuidB, map.unproject(plan.anchorPointB, thisplugin.PROJECT_ZOOM), 'ANCHOR B');
+    plan.chain.forEach(function (fp, idx) {
+      thisplugin.addLabel(fp.guid, map.unproject(fp.point, thisplugin.PROJECT_ZOOM), String(idx + 1));
+    });
+  };
+
   thisplugin.updateLayer = function () {
     var donelinks = [];
     var triangles = [];
@@ -7844,6 +8182,14 @@ function wrapper(plugin_info) {
     // This run's own set of fanpoints, which buildFanPlan() below keeps using even if it's called
     // after a later run has replaced thisplugin.fanpoints (see thisplugin.runOrientationSearch).
     var planFanpoints = thisplugin.fanpoints;
+
+    // Herringbone mode builds and draws its own, entirely different 2-anchor plan -- see
+    // thisplugin.updateHerringboneLayer -- instead of everything below (the single-anchor fan
+    // field's own anchor/direction search, buildFanPlan and drawPlan).
+    if (thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE) {
+      thisplugin.updateHerringboneLayer(planFanpoints, maplinksAll);
+      return;
+    }
 
     // Builds a candidate plan for a given anchor (guid, any fanpoint — not just a hull vertex)
     // and direction, entirely in local state — never touching thisplugin.startingpointIndex/
@@ -8582,6 +8928,13 @@ function wrapper(plugin_info) {
   var lockIconOpen = '<svg class="plugin_fanfields3_lock_svg" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18,8H17V6A5,5 0 0,0 12,1C10.06,1 8.4,2.13 7.6,3.75L9.32,4.44C9.75,3.6 10.79,3 12,3A3,3 0 0,1 15,6V8H6A2,2 0 0,0 4,10V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V10A2,2 0 0,0 18,8M12,17A2,2 0 0,1 10,15A2,2 0 0,1 12,13A2,2 0 0,1 14,15A2,2 0 0,1 12,17Z"/></svg>';
   var lockIconClosed = '<svg class="plugin_fanfields3_lock_svg" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z"/></svg>';
 
+  // Fan field / Herringbone mode icons (see thisplugin.fieldModeENUM, toggled by
+  // thisplugin.toggleFieldMode): a small fan of 3 lines from one point for Fan field mode, and 2
+  // stacked chevrons for Herringbone mode -- plain SVG for the same recolorable-via-CSS reason
+  // as the lock icons above.
+  var symbol_fanMode = '<svg class="plugin_fanfields3_mode_svg" viewBox="0 0 24 24" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12,21 L4,5"/><path d="M12,21 L12,4"/><path d="M12,21 L20,5"/></g></svg>';
+  var symbol_herringboneMode = '<svg class="plugin_fanfields3_mode_svg" viewBox="0 0 24 24" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3,7 L12,13 L21,7"/><path d="M3,13 L12,19 L21,13"/></g></svg>';
+
   thisplugin.addFfButtons = function () {
     thisplugin.ffButtons = L.Control.extend({
       options: {
@@ -8625,11 +8978,15 @@ function wrapper(plugin_info) {
 
         $(container)
           .append(
-            '<a id="fanfieldShiftLeftButton" href="javascript: void(0);" class="fanfields-control" title="FanFields shift left">' +
-            symbol_counterclockwise + '</a>'
+            '<a id="fanfieldModeToggleButton" href="javascript: void(0);" class="fanfields-control" title="' +
+            (thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE
+              ? 'Herringbone mode (2 anchors): click to switch to Fan field mode'
+              : 'Fan field mode (1 anchor): click to switch to Herringbone mode') + '">' +
+            (thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE ? symbol_herringboneMode : symbol_fanMode) +
+            '</a>'
           )
-          .on("click", "#fanfieldShiftLeftButton", function () {
-            thisplugin.previousStartingPoint();
+          .on("click", "#fanfieldModeToggleButton", function () {
+            thisplugin.toggleFieldMode();
           });
 
         $(container)
@@ -9020,7 +9377,8 @@ function wrapper(plugin_info) {
       useBookmarksOnly: thisplugin.use_bookmarks_only,
       manageBlockers: thisplugin.manageBlockers,
       blockerMaxDetourM: thisplugin.blockerMaxDetourM,
-      consumeKeysOnLinkThrown: thisplugin.consumeKeysOnLinkThrown
+      consumeKeysOnLinkThrown: thisplugin.consumeKeysOnLinkThrown,
+      fieldMode: thisplugin.fieldMode
     };
   };
 
@@ -9039,6 +9397,9 @@ function wrapper(plugin_info) {
     // saved.walkSimShowLinks (an older saved op/default may still carry it) is intentionally
     // never read any more: the sim's own links are always shown now, not a toggle.
     if (typeof saved.consumeKeysOnLinkThrown === 'boolean') thisplugin.consumeKeysOnLinkThrown = saved.consumeKeysOnLinkThrown;
+    if (saved.fieldMode === thisplugin.fieldModeENUM.FAN || saved.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE) {
+      thisplugin.fieldMode = saved.fieldMode;
+    }
   };
 
   // The current anchor, persisted continuously (every updateLayer() run — see where
@@ -9406,6 +9767,7 @@ function wrapper(plugin_info) {
     }
 
     thisplugin.updateLockButton();
+    thisplugin.updateFieldModeButton();
     thisplugin.maybeShowSyncTip();
 
     //         window.pluginCreateHook('pluginBkmrksEdit');
