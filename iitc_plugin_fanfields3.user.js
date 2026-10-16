@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         6.4.1.20261009
+// @version         7.0.0.20261016
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,20 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-09-223728';
+  plugin_info.dateTimeVersion = '2026-10-16-120000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '7.0.0',
+      changes: [
+        'NEW: Added Herringbone mode, an alternative to Fan field: a 2-anchor plan where every portal links to both anchors, with the best anchor pair found automatically. Switch between Fan field and Herringbone from a new icon on the map, in the spot the old Shift left button used to occupy.',
+        'NEW: Herringbone plans now show up in the Task List, Statistics and Manage Portal Order, the same way Fan field plans already did.',
+        'NEW: Added a Herringbone mode option (Inbounding, Outbounding, or Best, which tries both and keeps whichever walks less) and a Herringbone direction option (One side or Both sides of the anchor-to-anchor line), in the Options menu; both are saved the same way as every other option, including in a saved op.',
+      ],
+    },{
       version: '6.4.1',
       changes: [
         'FIX: On mobile, tapping the map\'s hamburger menu button popped up a native tooltip instead of just opening the menu.',
