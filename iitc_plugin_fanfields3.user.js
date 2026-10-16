@@ -4548,6 +4548,33 @@ function wrapper(plugin_info) {
   // off-hull/manual anchor picking yet, so there's no stale-search bookkeeping to race against.
   thisplugin.HERRINGBONE_SEARCH_BUDGET_MS = 3000;
 
+  // Herringbone-specific options (Options dialog, shown only in Herringbone mode -- see
+  // showOptionsDialog). Persisted the same way as every other option, via
+  // getCurrentOptionsSnapshot/applyOptionsSnapshot (so both "Save options as default" and a
+  // Manage Ops entry carry them).
+  //
+  // herringboneMode:
+  //  - INBOUND: every chain portal and the A-B base link all throw INTO the anchors (today's
+  //    only behavior) -- farm keys at the anchors as you walk the chain.
+  //  - OUTBOUND: every edge is reversed -- both anchors throw OUT to the whole chain (and to
+  //    each other), so the walk instead gathers keys along the chain first and throws
+  //    everything from the anchors at the end (see buildHerringboneChain/buildHerringboneFanpoints
+  //    for the edge/walk-order reversal). Each anchor's own outgoing count is capped the same
+  //    way a fan field anchor's is (8 + 8*availableSBUL), which bounds how long the chain can be.
+  //  - BEST: tries both INBOUND and OUTBOUND (for every candidate anchor pair) and keeps
+  //    whichever produces the shorter total walking distance.
+  thisplugin.herringboneModeENUM = { INBOUND: 0, OUTBOUND: 1, BEST: 2 };
+  thisplugin.herringboneMode = thisplugin.herringboneModeENUM.INBOUND;
+
+  // herringboneSide:
+  //  - BOTH_SIDE: the chain may zigzag on either side of the anchor A-anchor B line (today's
+  //    only behavior).
+  //  - ONE_SIDE: the chain is restricted to whichever side of that line holds more of the
+  //    candidate portals -- portals on the other side are left out of the plan entirely (see
+  //    buildHerringboneChain).
+  thisplugin.herringboneSideENUM = { ONE_SIDE: 0, BOTH_SIDE: 1 };
+  thisplugin.herringboneSide = thisplugin.herringboneSideENUM.BOTH_SIDE;
+
   thisplugin.toggleFieldMode = function () {
     thisplugin.fieldMode = (thisplugin.fieldMode === thisplugin.fieldModeENUM.FAN)
       ? thisplugin.fieldModeENUM.HERRINGBONE
@@ -7646,11 +7673,27 @@ function wrapper(plugin_info) {
   //
   // Returns null if the pair can't even throw its own A-B link (Respect Intel blocks it) or
   // there's no other portal at all to chain in. A pair whose candidates all get excluded still
-  // returns a (degenerate, chain-less) plan -- just the A-B link -- rather than null. `deadline`
-  // (a Date.now()-comparable timestamp, optional) bounds how long the search for each next
-  // portal may run -- see thisplugin.buildHerringbonePlan, which shares one deadline across every
-  // candidate anchor pair.
-  thisplugin.buildHerringboneChain = function (fanpoints, guidA, guidB, respectLinks, deadline) {
+  // returns a (degenerate, chain-less) plan -- just the A-B link -- rather than null.
+  //
+  // `opts`: { respectLinks, deadline, outbound, oneSide }.
+  //  - deadline (a Date.now()-comparable timestamp, optional) bounds how long the search for
+  //    each next portal may run -- see thisplugin.buildHerringbonePlan, which shares one
+  //    deadline across every candidate anchor pair (and, in BEST mode, across both the inbound
+  //    and outbound sub-searches).
+  //  - outbound: build the OUTBOUND edge/walk-order variant (see herringboneModeENUM) instead
+  //    of the default inbound one -- caps the chain length so each anchor's own outgoing count
+  //    never exceeds a fan field anchor's own SBUL-derived capacity (8 + 8*availableSBUL),
+  //    since both anchors throw outward to every chain portal here.
+  //  - oneSide: restrict the chain to whichever side of the anchor A-anchor B line holds more
+  //    of the candidate portals (see herringboneSideENUM) -- portals on the other side are
+  //    excluded up front, before the chain is even grown.
+  thisplugin.buildHerringboneChain = function (fanpoints, guidA, guidB, opts) {
+    opts = opts || {};
+    var respectLinks = opts.respectLinks || null;
+    var deadline = opts.deadline;
+    var outbound = !!opts.outbound;
+    var oneSide = !!opts.oneSide;
+
     var pointA = fanpoints[guidA];
     var pointB = fanpoints[guidB];
 
@@ -7674,17 +7717,52 @@ function wrapper(plugin_info) {
     var available = Object.keys(fanpoints).filter(function (guid) {
       return guid !== guidA && guid !== guidB;
     });
+
+    // One side only: keep whichever side of the A-B line holds more candidates, drop the rest
+    // up front (a dropped portal is excluded from this candidate's plan entirely, same as one
+    // the crossing-avoidance loop below could never attach).
+    var oneSideExcluded = [];
+    if (oneSide && available.length > 0) {
+      var abx = pointB.x - pointA.x, aby = pointB.y - pointA.y;
+      var sideOfGuid = {};
+      var positiveCount = 0, negativeCount = 0;
+      available.forEach(function (guid) {
+        var p = fanpoints[guid];
+        var cross = abx * (p.y - pointA.y) - aby * (p.x - pointA.x);
+        sideOfGuid[guid] = cross;
+        if (cross > 0) positiveCount++;
+        else if (cross < 0) negativeCount++;
+      });
+      var keepPositive = positiveCount >= negativeCount;
+      oneSideExcluded = available.filter(function (guid) {
+        var side = sideOfGuid[guid];
+        return side !== 0 && (keepPositive ? side < 0 : side > 0);
+      });
+      available = available.filter(function (guid) { return oneSideExcluded.indexOf(guid) === -1; });
+    }
+
     // Nothing to chain in at all (just the 2 anchors) -- there's no herringbone to speak of,
     // as opposed to every candidate existing but getting excluded below, which still returns a
     // (degenerate, chain-less) plan further down.
-    if (available.length === 0) return null;
+    if (available.length === 0 && oneSideExcluded.length === 0) return null;
+
+    // Outbound: both anchors throw OUT to every chain portal, so each anchor's own outgoing
+    // count is capped like a fan field anchor's (8 + 8*availableSBUL). The base link (reversed
+    // to B -> A in outbound -- see buildHerringboneFanpoints) is itself one of B's outgoing
+    // links, so B is the binding anchor: cap the chain at maxLinks - 1 so B never exceeds its
+    // own capacity (A, with no base link of its own, stays within it too).
+    var chainLengthCap = outbound ? Math.max(0, (8 + thisplugin.availableSBUL * 8) - 1) : Infinity;
 
     var chain = [];
-    var excludedGuids = [];
+    var excludedGuids = oneSideExcluded.slice();
     var prevGuid = null;
     var prevPoint = null;
 
     while (available.length > 0) {
+      if (chain.length >= chainLengthCap) {
+        excludedGuids = excludedGuids.concat(available);
+        break;
+      }
       if (deadline && Date.now() > deadline) {
         excludedGuids = excludedGuids.concat(available);
         break;
@@ -7748,6 +7826,12 @@ function wrapper(plugin_info) {
     // Keys needed per portal = how many of these links point AT it (incoming); A and B both
     // accumulate one per chain portal (plus B gets the base A->B link), which is why they're
     // usually the busiest -- same "centralizing" default the fan field itself starts from.
+    // Computed in this inbound convention regardless of `outbound` (acceptedLinks is never
+    // itself reversed -- only buildHerringboneFanpoints flips directions for the real plan):
+    // this score only ever ranks candidates against OTHERS BUILT THE SAME WAY (every call in a
+    // given searchHerringbonePairs sub-search shares the same `outbound` flag), so the relative
+    // ordering it produces stays meaningful even though the absolute numbers wouldn't match an
+    // outbound plan's real key counts.
     var incomingCount = {};
     var reused = 0;
     acceptedLinks.forEach(function (link) {
@@ -7768,22 +7852,58 @@ function wrapper(plugin_info) {
       excludedGuids: excludedGuids,
       links: acceptedLinks,
       triangles: triangles,
+      outbound: outbound,
       score: { reused: reused, fields: triangles.length, maxKeys: maxKeys }
     };
   };
 
+  // Total walking distance of a herringbone candidate's own walk order (see
+  // buildHerringboneFanpoints) -- used only to compare an INBOUND candidate against an
+  // OUTBOUND one in BEST mode (see buildHerringbonePlan); within a single mode, anchor-pair
+  // candidates are still ranked by isBetterHerringboneScore, same as before BEST existed.
+  thisplugin.computeHerringboneWalkDistance = function (plan) {
+    var order = thisplugin.buildHerringboneFanpoints(plan).sortedFanpoints;
+    var total = 0;
+    for (var i = 1; i < order.length; i++) {
+      total += thisplugin.distanceTo(order[i - 1].point, order[i].point);
+    }
+    return total;
+  };
+
   // Searches candidate anchor pairs (every pair of portals in `fanpoints`, farthest apart first
   // -- in practice the pair that leaves the most room for a long, non-crossing chain) for the
-  // best-scoring herringbone (see isBetterHerringboneScore), within
-  // thisplugin.HERRINGBONE_SEARCH_BUDGET_MS -- trying every pair (not just the convex hull's)
-  // measurably finds longer chains on real, non-corridor-shaped portal clusters, and was fast
-  // enough in practice (well under a second for 76 portals) that the time budget, not a hull
-  // restriction, is what should cap the search on an unusually large selection. Returns null if
+  // best-scoring herringbone (see isBetterHerringboneScore), within `deadline` -- trying every
+  // pair (not just the convex hull's) measurably finds longer chains on real, non-corridor-
+  // shaped portal clusters, and was fast enough in practice (well under a second for 76
+  // portals) that the time budget, not a hull restriction, is what should cap the search on an
+  // unusually large selection. `outbound`/`oneSide` are forwarded as-is to every
+  // buildHerringboneChain call (see herringboneModeENUM/herringboneSideENUM). Returns null if
   // there are fewer than 3 portals to plan with, or no pair produced a usable chain at all.
+  thisplugin.searchHerringbonePairs = function (fanpoints, pairs, respectLinks, outbound, oneSide, deadline) {
+    var best = null;
+    for (var k = 0; k < pairs.length; k++) {
+      if (Date.now() > deadline) break;
+      var candidate = thisplugin.buildHerringboneChain(fanpoints, pairs[k].guidA, pairs[k].guidB, {
+        respectLinks: respectLinks, deadline: deadline, outbound: outbound, oneSide: oneSide
+      });
+      if (candidate && (!best || thisplugin.isBetterHerringboneScore(candidate.score, best.score))) {
+        best = candidate;
+      }
+    }
+    return best;
+  };
+
+  // `options`: { respectLinks, mode (herringboneModeENUM), side (herringboneSideENUM) }.
+  // mode === BEST splits thisplugin.HERRINGBONE_SEARCH_BUDGET_MS in two, runs a full INBOUND
+  // search and a full OUTBOUND search (each restricted to its own half of the budget so the
+  // overall search stays bounded the same way a single-mode one is), and keeps whichever final
+  // plan actually walks less (see computeHerringboneWalkDistance) -- not whichever scored
+  // better on isBetterHerringboneScore, which never looks at distance at all.
   thisplugin.buildHerringbonePlan = function (fanpoints, options) {
     options = options || {};
     var respectLinks = options.respectLinks || null;
-    var deadline = Date.now() + thisplugin.HERRINGBONE_SEARCH_BUDGET_MS;
+    var mode = (options.mode !== undefined) ? options.mode : thisplugin.herringboneModeENUM.INBOUND;
+    var oneSide = options.side === thisplugin.herringboneSideENUM.ONE_SIDE;
 
     var guids = Object.keys(fanpoints);
     if (guids.length < 3) return null;
@@ -7802,15 +7922,19 @@ function wrapper(plugin_info) {
     }
     pairs.sort(function (p1, p2) { return p2.distance - p1.distance; });
 
-    var best = null;
-    for (var k = 0; k < pairs.length; k++) {
-      if (Date.now() > deadline) break;
-      var candidate = thisplugin.buildHerringboneChain(fanpoints, pairs[k].guidA, pairs[k].guidB, respectLinks, deadline);
-      if (candidate && (!best || thisplugin.isBetterHerringboneScore(candidate.score, best.score))) {
-        best = candidate;
-      }
+    if (mode === thisplugin.herringboneModeENUM.BEST) {
+      var half = thisplugin.HERRINGBONE_SEARCH_BUDGET_MS / 2;
+      var bestInbound = thisplugin.searchHerringbonePairs(fanpoints, pairs, respectLinks, false, oneSide, Date.now() + half);
+      var bestOutbound = thisplugin.searchHerringbonePairs(fanpoints, pairs, respectLinks, true, oneSide, Date.now() + half);
+      if (!bestInbound) return bestOutbound;
+      if (!bestOutbound) return bestInbound;
+      return (thisplugin.computeHerringboneWalkDistance(bestOutbound) < thisplugin.computeHerringboneWalkDistance(bestInbound))
+        ? bestOutbound
+        : bestInbound;
     }
-    return best;
+
+    var outbound = (mode === thisplugin.herringboneModeENUM.OUTBOUND);
+    return thisplugin.searchHerringbonePairs(fanpoints, pairs, respectLinks, outbound, oneSide, Date.now() + thisplugin.HERRINGBONE_SEARCH_BUDGET_MS);
   };
 
   // Converts a herringbone plan (see buildHerringbonePlan) into the SAME fp-shaped structure
@@ -7822,11 +7946,21 @@ function wrapper(plugin_info) {
   // (stays "") -- that's what keeps the fan-only code paths that key off it (outbound/SBUL
   // reconciliation, the "Less walking" link-order optimizer) safely no-op'd for herringbone.
   //
-  // Walk order: [anchor B, anchor A, chain...]. buildHerringboneChain's own convention is that a
-  // link's "guidA" always throws to its "guidB" (needing guidB's key already), and the base link
-  // is guidA=anchor A -> guidB=anchor B -- so anchor B must be visited (and keyed) first; anchor
-  // A follows, and only then does the chain start, since every chain portal's own toA/toB links
-  // need both anchors' keys already in hand.
+  // Walk order (INBOUND, plan.outbound falsy): [anchor B, anchor A, chain...].
+  // buildHerringboneChain's own convention is that a link's "guidA" always throws to its
+  // "guidB" (needing guidB's key already), and the base link is guidA=anchor A -> guidB=anchor
+  // B -- so anchor B must be visited (and keyed) first; anchor A follows, and only then does
+  // the chain start, since every chain portal's own toA/toB links need both anchors' keys
+  // already in hand.
+  //
+  // Walk order (OUTBOUND, plan.outbound truthy): every one of the links above is reversed
+  // (thrower and target swapped -- both anchors now throw OUT to the whole chain and to each
+  // other, instead of the chain and the base link throwing IN), which reverses the valid
+  // visiting order top to bottom: [chain reversed..., anchor A, anchor B]. Each chain portal
+  // still only needs ITS OWN predecessor's key (the chain edge is reversed too, predecessor ->
+  // successor becomes successor -> predecessor), so the chain is walked newest-to-oldest; both
+  // anchors come last since they each need every chain portal's key before throwing outward,
+  // and B needs A's key too (the reversed base link, B -> A).
   //
   // Each triangle the chain builds up (see buildHerringboneChain's own comment) is attached, as
   // a "creatingFieldsWith" third point, to ONE of its 3 sides -- simulateWalk registers a
@@ -7859,6 +7993,19 @@ function wrapper(plugin_info) {
     var anchorA = makeFp(plan.anchorGuidA, plan.anchorPointA);
     var anchorB = makeFp(plan.anchorGuidB, plan.anchorPointB);
     var chainFps = plan.chain.map(function (c) { return makeFp(c.guid, c.point); });
+
+    if (plan.outbound) {
+      link(anchorB, anchorA, chainFps.length ? [chainFps[0].point] : []);
+      chainFps.forEach(function (fp, i) {
+        link(anchorA, fp, []);
+        link(anchorB, fp, []);
+        if (i > 0) link(chainFps[i - 1], fp, [anchorA.point, anchorB.point]);
+      });
+      return {
+        sortedFanpoints: chainFps.slice().reverse().concat([anchorA, anchorB]),
+        n: chainFps.length + 2
+      };
+    }
 
     link(anchorA, anchorB, chainFps.length ? [chainFps[0].point] : []);
 
@@ -7893,7 +8040,11 @@ function wrapper(plugin_info) {
     // asynchronous orientation search this flag otherwise tracks.
     thisplugin._orientationSearchPending = false;
 
-    thisplugin.herringbonePlan = thisplugin.buildHerringbonePlan(fanpoints, { respectLinks: respectLinks });
+    thisplugin.herringbonePlan = thisplugin.buildHerringbonePlan(fanpoints, {
+      respectLinks: respectLinks,
+      mode: thisplugin.herringboneMode,
+      side: thisplugin.herringboneSide
+    });
 
     if (thisplugin.herringbonePlan) {
       var converted = thisplugin.buildHerringboneFanpoints(thisplugin.herringbonePlan);
@@ -7972,7 +8123,11 @@ function wrapper(plugin_info) {
 
     thisplugin.addLabel(plan.anchorGuidA, map.unproject(plan.anchorPointA, thisplugin.PROJECT_ZOOM), 'ANCHOR A');
     thisplugin.addLabel(plan.anchorGuidB, map.unproject(plan.anchorPointB, thisplugin.PROJECT_ZOOM), 'ANCHOR B');
-    plan.chain.forEach(function (fp, idx) {
+    // Numbered in actual walk order, not build order -- outbound walks the chain newest-to-
+    // oldest (see buildHerringboneFanpoints), so these numbers stay consistent with the Task
+    // List's own position numbers (which follow thisplugin.getDisplayOrder()).
+    var chainInWalkOrder = plan.outbound ? plan.chain.slice().reverse() : plan.chain;
+    chainInWalkOrder.forEach(function (fp, idx) {
       thisplugin.addLabel(fp.guid, map.unproject(fp.point, thisplugin.PROJECT_ZOOM), String(idx + 1));
     });
   };
@@ -9068,7 +9223,7 @@ function wrapper(plugin_info) {
   // stacked chevrons for Herringbone mode -- plain SVG for the same recolorable-via-CSS reason
   // as the lock icons above.
   var symbol_fanMode = '<svg class="plugin_fanfields3_mode_svg" viewBox="0 0 24 24" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M12,21 L4,5"/><path d="M12,21 L12,4"/><path d="M12,21 L20,5"/></g></svg>';
-  var symbol_herringboneMode = '<svg class="plugin_fanfields3_mode_svg" viewBox="0 0 24 24" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3,7 L12,13 L21,7"/><path d="M3,13 L12,19 L21,13"/></g></svg>';
+  var symbol_herringboneMode = '<svg class="plugin_fanfields3_mode_svg" viewBox="0 0 24 24" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3,13 L12,7 L21,13"/><path d="M3,19 L12,13 L21,19"/></g></svg>';
 
   thisplugin.addFfButtons = function () {
     thisplugin.ffButtons = L.Control.extend({
@@ -9513,7 +9668,9 @@ function wrapper(plugin_info) {
       manageBlockers: thisplugin.manageBlockers,
       blockerMaxDetourM: thisplugin.blockerMaxDetourM,
       consumeKeysOnLinkThrown: thisplugin.consumeKeysOnLinkThrown,
-      fieldMode: thisplugin.fieldMode
+      fieldMode: thisplugin.fieldMode,
+      herringboneMode: thisplugin.herringboneMode,
+      herringboneSide: thisplugin.herringboneSide
     };
   };
 
@@ -9534,6 +9691,15 @@ function wrapper(plugin_info) {
     if (typeof saved.consumeKeysOnLinkThrown === 'boolean') thisplugin.consumeKeysOnLinkThrown = saved.consumeKeysOnLinkThrown;
     if (saved.fieldMode === thisplugin.fieldModeENUM.FAN || saved.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE) {
       thisplugin.fieldMode = saved.fieldMode;
+    }
+    if (saved.herringboneMode === thisplugin.herringboneModeENUM.INBOUND ||
+      saved.herringboneMode === thisplugin.herringboneModeENUM.OUTBOUND ||
+      saved.herringboneMode === thisplugin.herringboneModeENUM.BEST) {
+      thisplugin.herringboneMode = saved.herringboneMode;
+    }
+    if (saved.herringboneSide === thisplugin.herringboneSideENUM.ONE_SIDE ||
+      saved.herringboneSide === thisplugin.herringboneSideENUM.BOTH_SIDE) {
+      thisplugin.herringboneSide = saved.herringboneSide;
     }
   };
 
@@ -9564,12 +9730,19 @@ function wrapper(plugin_info) {
     localStorage.setItem(thisplugin.OPTIONS_STORAGE_KEY, JSON.stringify(thisplugin.getCurrentOptionsSnapshot()));
   };
 
-  // Settings dialog: direction/fan mode/SBUL/Respect Intel/portal selection, each applied
-  // immediately on change and persisted straight to localStorage, so the dialog has nothing
-  // left to confirm or discard — it's just closed via its own title bar once done.
+  // Settings dialog. The first block of rows (direction/fan mode/SBUL vs. herringbone
+  // mode/direction/SBUL) depends on thisplugin.fieldMode -- the single-anchor fan field and
+  // the 2-anchor herringbone have their own, unrelated notions of "direction"/"mode", so each
+  // only shows its own. The rest (Respect Intel, Blockers, Portal selection, Spend keys on
+  // throw) applies to both and is always shown. Every row applies immediately on change and
+  // persists straight to localStorage, so the dialog has nothing left to confirm or discard —
+  // it's just closed via its own title bar once done.
   thisplugin.showOptionsDialog = function () {
     var hasBookmarks = typeof window.plugin.bookmarks !== 'undefined';
+    var isHerringbone = thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE;
     var isRadiating = thisplugin.stardirection === thisplugin.starDirENUM.RADIATING;
+    var herringboneNeedsSbul = thisplugin.herringboneMode !== thisplugin.herringboneModeENUM.INBOUND;
+    var showSbul = isHerringbone ? herringboneNeedsSbul : isRadiating;
 
     var respectOptions = [
       { value: thisplugin.respectIntelLinksModeENUM.NONE, label: 'None' },
@@ -9583,21 +9756,38 @@ function wrapper(plugin_info) {
 
     var html = '<div id="plugin_fanfields3_options_dialog">';
 
-    html += '<div class="plugin_fanfields3_options_row">' +
-      '<label for="plugin_fanfields3_opt_direction">Direction</label>' +
-      '<select id="plugin_fanfields3_opt_direction">' +
-      '<option value="cw"' + (thisplugin.is_clockwise ? ' selected' : '') + '>Clockwise</option>' +
-      '<option value="ccw"' + (!thisplugin.is_clockwise ? ' selected' : '') + '>Counterclockwise</option>' +
-      '</select></div>';
+    if (isHerringbone) {
+      html += '<div class="plugin_fanfields3_options_row">' +
+        '<label for="plugin_fanfields3_opt_hbmode" title="Inbounding: the chain and the anchor-to-anchor link all throw INTO the 2 anchors. Outbounding: both anchors throw OUT to the whole chain instead (capacity limited by Available SBUL below). Best: tries both and keeps whichever walks less.">Herringbone&nbsp;mode</label>' +
+        '<select id="plugin_fanfields3_opt_hbmode">' +
+        '<option value="' + thisplugin.herringboneModeENUM.INBOUND + '"' + (thisplugin.herringboneMode === thisplugin.herringboneModeENUM.INBOUND ? ' selected' : '') + '>Inbounding</option>' +
+        '<option value="' + thisplugin.herringboneModeENUM.OUTBOUND + '"' + (thisplugin.herringboneMode === thisplugin.herringboneModeENUM.OUTBOUND ? ' selected' : '') + '>Outbounding</option>' +
+        '<option value="' + thisplugin.herringboneModeENUM.BEST + '"' + (thisplugin.herringboneMode === thisplugin.herringboneModeENUM.BEST ? ' selected' : '') + '>Best (least walking)</option>' +
+        '</select></div>';
 
-    html += '<div class="plugin_fanfields3_options_row">' +
-      '<label for="plugin_fanfields3_opt_fanmode">Fan mode</label>' +
-      '<select id="plugin_fanfields3_opt_fanmode">' +
-      '<option value="in"' + (!isRadiating ? ' selected' : '') + '>Inbounding</option>' +
-      '<option value="out"' + (isRadiating ? ' selected' : '') + '>Outbounding</option>' +
-      '</select></div>';
+      html += '<div class="plugin_fanfields3_options_row">' +
+        '<label for="plugin_fanfields3_opt_hbside" title="One side: the chain stays on a single side of the anchor-to-anchor line (portals on the other side are left out of the plan). Both sides: the chain may zigzag across either side.">Herringbone&nbsp;direction</label>' +
+        '<select id="plugin_fanfields3_opt_hbside">' +
+        '<option value="' + thisplugin.herringboneSideENUM.ONE_SIDE + '"' + (thisplugin.herringboneSide === thisplugin.herringboneSideENUM.ONE_SIDE ? ' selected' : '') + '>One side</option>' +
+        '<option value="' + thisplugin.herringboneSideENUM.BOTH_SIDE + '"' + (thisplugin.herringboneSide === thisplugin.herringboneSideENUM.BOTH_SIDE ? ' selected' : '') + '>Both sides</option>' +
+        '</select></div>';
+    } else {
+      html += '<div class="plugin_fanfields3_options_row">' +
+        '<label for="plugin_fanfields3_opt_direction">Direction</label>' +
+        '<select id="plugin_fanfields3_opt_direction">' +
+        '<option value="cw"' + (thisplugin.is_clockwise ? ' selected' : '') + '>Clockwise</option>' +
+        '<option value="ccw"' + (!thisplugin.is_clockwise ? ' selected' : '') + '>Counterclockwise</option>' +
+        '</select></div>';
 
-    html += '<div id="plugin_fanfields3_availablesbul" class="plugin_fanfields3_options_row plugin_fanfields3_options_subrow" style="display:' + (isRadiating ? 'flex' : 'none') + ';">' +
+      html += '<div class="plugin_fanfields3_options_row">' +
+        '<label for="plugin_fanfields3_opt_fanmode">Fan mode</label>' +
+        '<select id="plugin_fanfields3_opt_fanmode">' +
+        '<option value="in"' + (!isRadiating ? ' selected' : '') + '>Inbounding</option>' +
+        '<option value="out"' + (isRadiating ? ' selected' : '') + '>Outbounding</option>' +
+        '</select></div>';
+    }
+
+    html += '<div id="plugin_fanfields3_availablesbul" class="plugin_fanfields3_options_row plugin_fanfields3_options_subrow" style="display:' + (showSbul ? 'flex' : 'none') + ';">' +
       '<span class="plugin_fanfields3_availablesbul_label">Available&nbsp;SBUL</span>' +
       '<span class="plugin_fanfields3_multibtn" style="flex: 50%">' +
       '<a id="plugin_fanfields3_inscsbulbtn" class="plugin_fanfields3_minibtn" onclick="window.plugin.fanfields.decreaseSBUL();">' + symbol_left + '</a>' +
@@ -9671,6 +9861,19 @@ function wrapper(plugin_info) {
       if (wantRadiating !== currentlyRadiating) thisplugin.toggleStarDirection();
       $('#plugin_fanfields3_availablesbul').toggle(wantRadiating);
       thisplugin.saveOptionsDefault();
+    });
+
+    $('#plugin_fanfields3_opt_hbmode').on('change', function () {
+      thisplugin.herringboneMode = parseInt($(this).val(), 10);
+      $('#plugin_fanfields3_availablesbul').toggle(thisplugin.herringboneMode !== thisplugin.herringboneModeENUM.INBOUND);
+      thisplugin.saveOptionsDefault();
+      thisplugin.delayedUpdateLayer(0.2, true);
+    });
+
+    $('#plugin_fanfields3_opt_hbside').on('change', function () {
+      thisplugin.herringboneSide = parseInt($(this).val(), 10);
+      thisplugin.saveOptionsDefault();
+      thisplugin.delayedUpdateLayer(0.2, true);
     });
 
     $('#plugin_fanfields3_opt_respect').on('change', function () {

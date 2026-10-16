@@ -168,7 +168,7 @@ test('buildHerringboneChain: Respect Intel blocks a crossing in-game link from a
   // from C at y=10.
   const respectLink = { a: new FakePoint(-10, 5), b: new FakePoint(110, 5) };
 
-  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', [respectLink]);
+  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', { respectLinks: [respectLink] });
   assert.ok(plan, 'the base A-B link itself does not cross the respected link, so a (degenerate) plan is still returned');
   assert.equal(plan.chain.length, 0, 'C is excluded because both its links would cross the respected link');
   assert.deepEqual(toHostArray(plan.excludedGuids), ['C']);
@@ -462,4 +462,180 @@ test('updateLayer() still builds a normal fan field plan when fieldMode is FAN (
 
   assert.equal(thisplugin.herringbonePlan, undefined);
   assert.equal(thisplugin.sortedFanpoints.length, portals.length);
+});
+
+test('getCurrentOptionsSnapshot/applyOptionsSnapshot: herringboneMode/herringboneSide round-trip like fieldMode', () => {
+  const { thisplugin } = createPluginSandbox();
+  thisplugin.herringboneMode = thisplugin.herringboneModeENUM.OUTBOUND;
+  thisplugin.herringboneSide = thisplugin.herringboneSideENUM.ONE_SIDE;
+
+  const snapshot = thisplugin.getCurrentOptionsSnapshot();
+  assert.equal(snapshot.herringboneMode, thisplugin.herringboneModeENUM.OUTBOUND);
+  assert.equal(snapshot.herringboneSide, thisplugin.herringboneSideENUM.ONE_SIDE);
+
+  thisplugin.herringboneMode = thisplugin.herringboneModeENUM.INBOUND;
+  thisplugin.herringboneSide = thisplugin.herringboneSideENUM.BOTH_SIDE;
+  thisplugin.applyOptionsSnapshot(snapshot);
+  assert.equal(thisplugin.herringboneMode, thisplugin.herringboneModeENUM.OUTBOUND);
+  assert.equal(thisplugin.herringboneSide, thisplugin.herringboneSideENUM.ONE_SIDE);
+
+  // An unrecognized/missing value is left alone rather than resetting to the default.
+  thisplugin.applyOptionsSnapshot({});
+  assert.equal(thisplugin.herringboneMode, thisplugin.herringboneModeENUM.OUTBOUND);
+  assert.equal(thisplugin.herringboneSide, thisplugin.herringboneSideENUM.ONE_SIDE);
+});
+
+test('buildHerringboneChain: oneSide keeps only the majority side of the anchor A-B line, excluding the rest', () => {
+  const { thisplugin } = createPluginSandbox();
+  // 3 portals on one side of the A-B line, 1 lone portal on the other -- the majority side must
+  // win and the lone portal must be excluded by the pre-filter itself, regardless of which side
+  // (positive or negative cross-product) happens to hold the majority.
+  const majorityAbove = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3],
+    F: [40, -15]
+  });
+  const above = thisplugin.buildHerringboneChain(majorityAbove, 'A', 'B', { oneSide: true });
+  assert.ok(above);
+  assert.deepEqual(chainGuids(above), ['C', 'D', 'E']);
+  assert.deepEqual(toHostArray(above.excludedGuids), ['F']);
+
+  // Mirrored: majority now below the line, lone candidate above it.
+  const majorityBelow = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, -20], D: [50, -10], E: [80, -3],
+    F: [40, 15]
+  });
+  const below = thisplugin.buildHerringboneChain(majorityBelow, 'A', 'B', { oneSide: true });
+  assert.ok(below);
+  assert.deepEqual(chainGuids(below), ['C', 'D', 'E']);
+  assert.deepEqual(toHostArray(below.excludedGuids), ['F']);
+});
+
+test('buildHerringboneChain: outbound caps the chain at each anchor\'s own SBUL-derived outgoing capacity', () => {
+  const portals = loadFixturePortals('orly-76-portals.json');
+  const sandbox = createPluginSandbox();
+  const { thisplugin } = sandbox;
+  wirePlanInputs(sandbox, portals);
+
+  const realConsoleLog = console.log;
+  console.log = function () {};
+  let fanpoints;
+  try {
+    thisplugin.updateLayer(); // fan mode is enough to populate thisplugin.fanpoints
+    fanpoints = thisplugin.fanpoints;
+  } finally {
+    console.log = realConsoleLog;
+  }
+
+  const inboundPlan = thisplugin.buildHerringbonePlan(fanpoints, { mode: thisplugin.herringboneModeENUM.INBOUND });
+  assert.ok(inboundPlan.chain.length > 7,
+    'the fixture must give inbound (no capacity concern) a chain longer than the cap tested below');
+
+  thisplugin.availableSBUL = 0; // maxLinks = 8 -> cap = maxLinks - 1 = 7 (see the base link to B)
+  const totalCandidates = Object.keys(fanpoints).length - 2;
+  // Same anchor pair inbound already found works with, so this isolates the capacity cap
+  // itself from the pair-search possibly also preferring a different (already short) pair.
+  const outbound = thisplugin.buildHerringboneChain(fanpoints, inboundPlan.anchorGuidA, inboundPlan.anchorGuidB, { outbound: true });
+  assert.ok(outbound);
+  assert.equal(outbound.chain.length, 7, 'outbound stops once B would need its own 8th outgoing link (base link + 7 chain)');
+  assert.equal(outbound.excludedGuids.length, totalCandidates - 7);
+});
+
+test('buildHerringboneFanpoints: outbound reverses every link direction and walks the chain newest-to-oldest', () => {
+  const { thisplugin } = createPluginSandbox();
+  const fanpoints = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3]
+  });
+
+  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', { outbound: true });
+  const converted = thisplugin.buildHerringboneFanpoints(plan);
+
+  const order = toHostArray(converted.sortedFanpoints);
+  assert.deepEqual(order.map(function (fp) { return fp.guid; }), ['E', 'D', 'C', 'A', 'B'],
+    'chain newest-to-oldest, then anchor A, then anchor B (A needs no one\'s key but its own target\'s; B needs A\'s too)');
+
+  const byGuid = {};
+  order.forEach(function (fp) { byGuid[fp.guid] = fp; });
+  function outgoingGuids(guid) {
+    return toHostArray(byGuid[guid].outgoing).map(function (fp) { return fp.guid; }).sort();
+  }
+
+  // Base link reversed: B throws to A (needs A's key) -- A is the only thing B needs that
+  // isn't already in the chain.
+  assert.deepEqual(toHostArray(byGuid.A.incoming).map(function (fp) { return fp.guid; }), ['B'],
+    'A only ever receives the reversed base link, from B');
+
+  // Both anchors throw OUT to every chain portal; the chain edge is reversed too (predecessor
+  // throws to successor, so each chain portal still only needs its own predecessor's key).
+  assert.deepEqual(outgoingGuids('A'), ['C', 'D', 'E']);
+  assert.deepEqual(outgoingGuids('B'), ['A', 'C', 'D', 'E'].sort());
+  assert.deepEqual(outgoingGuids('C'), ['D']);
+  assert.deepEqual(outgoingGuids('D'), ['E']);
+  assert.equal(byGuid.E.outgoing.length, 0, 'the newest chain portal throws nothing onward');
+
+  // Fields must still all form correctly in this reversed walk order -- same invariant as the
+  // inbound conversion test, just walked back to front.
+  const sim = thisplugin.simulateWalk(order);
+  assert.equal(sim.triangles.length, plan.triangles.length);
+  assert.equal(Object.keys(sim.invalid).length, 0);
+});
+
+test('computeHerringboneWalkDistance: inbound and outbound walk the exact same total distance for the same chain', () => {
+  const { thisplugin } = createPluginSandbox();
+  const fanpoints = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3]
+  });
+
+  // Outbound's own walk order is the exact reverse of inbound's for the same chain (see
+  // buildHerringboneFanpoints), and distance is symmetric -- so the two totals must match
+  // exactly, not just approximately.
+  const inboundPlan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', {});
+  const outboundPlan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', { outbound: true });
+
+  const inboundDistance = thisplugin.computeHerringboneWalkDistance(inboundPlan);
+  const outboundDistance = thisplugin.computeHerringboneWalkDistance(outboundPlan);
+  assert.ok(Math.abs(outboundDistance - inboundDistance) < 1e-9,
+    'expected ' + inboundDistance + ' and ' + outboundDistance + ' to match up to floating-point noise');
+});
+
+test('buildHerringbonePlan: BEST mode returns whichever of a dedicated INBOUND/OUTBOUND search actually walks less', () => {
+  const portals = loadFixturePortals('orly-76-portals.json');
+  const sandbox = createPluginSandbox();
+  const { thisplugin } = sandbox;
+  wirePlanInputs(sandbox, portals);
+
+  const realConsoleLog = console.log;
+  console.log = function () {};
+  let fanpoints;
+  try {
+    thisplugin.updateLayer(); // fan mode is enough to populate thisplugin.fanpoints
+    fanpoints = thisplugin.fanpoints;
+  } finally {
+    console.log = realConsoleLog;
+  }
+
+  thisplugin.availableSBUL = 0; // forces outbound's capacity cap to actually bite, so the two
+                                 // modes genuinely end up walking different distances below
+
+  const dedicatedInbound = thisplugin.buildHerringbonePlan(fanpoints, { mode: thisplugin.herringboneModeENUM.INBOUND });
+  const dedicatedOutbound = thisplugin.buildHerringbonePlan(fanpoints, { mode: thisplugin.herringboneModeENUM.OUTBOUND });
+  assert.ok(dedicatedInbound && dedicatedOutbound);
+
+  const inboundDistance = thisplugin.computeHerringboneWalkDistance(dedicatedInbound);
+  const outboundDistance = thisplugin.computeHerringboneWalkDistance(dedicatedOutbound);
+  assert.notEqual(inboundDistance, outboundDistance,
+    'the fixture must make INBOUND and OUTBOUND genuinely walk different distances for this to test anything');
+
+  const best = thisplugin.buildHerringbonePlan(fanpoints, { mode: thisplugin.herringboneModeENUM.BEST });
+  assert.ok(best, 'BEST must still find a plan');
+
+  const bestDistance = thisplugin.computeHerringboneWalkDistance(best);
+  const shorterDistance = Math.min(inboundDistance, outboundDistance);
+  assert.ok(Math.abs(bestDistance - shorterDistance) < 1e-9,
+    'BEST must walk exactly as little as the better of its own two dedicated sub-searches');
+  assert.equal(best.outbound, outboundDistance < inboundDistance,
+    'BEST must have actually kept the shorter-walking candidate, not just scored the same');
 });
