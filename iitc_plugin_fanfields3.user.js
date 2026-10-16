@@ -2148,10 +2148,12 @@ function wrapper(plugin_info) {
           }
           linkDetailText += '</td>';
 
-          // ghi#23 (link flip): swap this link's direction, in its own compact column. Excluded only
-          // for a link already done in-game (nothing left to flip) — anchor (fan/star) links are flippable too.
+          // ghi#23 (link flip): swap this link's direction, in its own compact column. Excluded
+          // for a link already done in-game (nothing left to flip) — anchor (fan/star) links are
+          // flippable too — and for Herringbone mode, whose own build never consults a manual
+          // flip, so the button would visibly do nothing.
           linkDetailText += '<td>';
-          if (!linkDone) {
+          if (!linkDone && thisplugin.fieldMode !== thisplugin.fieldModeENUM.HERRINGBONE) {
             var isFlipped = thisplugin.isLinkFlipped(portal.guid, outPortal.guid);
             linkDetailText += '<button class="plugin_fanfields3_link_flip_btn' + (isFlipped ? ' plugin_fanfields3_link_flipped' : '') +
               '" data-guid-a="' + portal.guid + '" data-guid-b="' + outPortal.guid + '" title="' +
@@ -3180,6 +3182,103 @@ function wrapper(plugin_info) {
 
   // ghi#23 start (3)
   // Manage-Order-Dialog
+  // Manage Portal Order dialog: build the HTML for the current plan's table (fan field: a
+  // single pinned anchor row, drag-and-drop reorder below it; Herringbone: both anchors, no
+  // reordering yet -- see thisplugin.buildHerringboneFanpoints). A standalone, directly callable
+  // function (same convention as buildTaskListHTML/buildStatisticsHTML/buildManageOpsHTML), not
+  // a closure local to showManageOrderDialog, so it can be tested on its own.
+  thisplugin.buildManageOrderTableHTML = function () {
+    var isMobile = L && L.Browser && L.Browser.mobile;
+
+    var html = '';
+    html += '<table id="plugin_fanfields3_order_table" class="plugin_fanfields3_order_table">';
+    html += '<thead><tr>';
+    // html += '<th class="plugin_fanfields3_order_gripcol" style="width:22px;"></th>';
+    html += '<th class="plugin_fanfields3_order_move_col" style="width:36px;"></th>';
+    html += '<th style="width:30px;">#</th>';
+    html += '<th>Portal</th>';
+    html += '<th style="width:60px;">Keys</th>';
+    html += '<th style="width:60px;">Links out</th>';
+    html += '</tr></thead><tbody>';
+
+    // Herringbone mode has 2 anchors (buildHerringbonePlan's anchorGuidA/B) and no manual
+    // reordering yet (the chain's own link directions are fixed by construction) -- every
+    // row gets the same fixed, non-draggable treatment the fan field's own single pinned
+    // anchor row already uses, and the two anchors are labelled individually.
+    var isHerringbone = thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE;
+    var hbPlan = isHerringbone ? thisplugin.herringbonePlan : null;
+
+    thisplugin.sortedFanpoints.forEach(function (fp, idx) {
+      var p = fp.portal;
+      var title = (p && p.options && p.options.data && p.options.data.title) ? p.options.data.title : 'unknown title';
+
+      var keys = (fp.incomingValidCount !== undefined) ? fp.incomingValidCount : (fp.incoming ? fp.incoming.length : 0);
+      var out = (fp.outgoingValidCount !== undefined) ? fp.outgoingValidCount : (fp.outgoing ? fp.outgoing.length : 0);
+
+      var isAnchor = isHerringbone
+        ? !!(hbPlan && (fp.guid === hbPlan.anchorGuidA || fp.guid === hbPlan.anchorGuidB))
+        : (fp.guid === thisplugin.startingpointGUID);
+      var anchorLabel = isHerringbone
+        ? ((hbPlan && fp.guid === hbPlan.anchorGuidA) ? 'anchor A' : 'anchor B')
+        : 'anchor';
+      var trClass = isAnchor ? 'plugin_fanfields3_order_anchor' : 'plugin_fanfields3_order_row';
+
+      // Grip/Move column: handle for normal rows, arrows for mobile, anchor icon for the
+      // pinned row(s) -- every row in Herringbone mode, since none of them are draggable yet.
+      var moveCell = '';
+
+      if (isHerringbone) {
+        moveCell = '<td class="plugin_fanfields3_order_gripcol">' +
+          (isAnchor ? '<span class="plugin_fanfields3_order_anchor_icon" title="Anchor row">&#9875;</span>' : '') +
+          '</td>';
+      } else if (isAnchor) {
+        moveCell =
+          '<td class="plugin_fanfields3_order_gripcol"><span class="plugin_fanfields3_order_anchor_icon" title="Anchor row">&#9875;</span></td>';
+      } else {
+        if (isMobile) {
+          moveCell = '<td class="plugin_fanfields3_order_move_col">' +
+            '<button class="plugin_fanfields3_order_move plugin_fanfields3_order_move_up" title="Move up">&#9650;</button>' +
+            '<button class="plugin_fanfields3_order_move plugin_fanfields3_order_move_down" title="Move down">&#9660;</button>' +
+            '</td>';
+        } else {
+          moveCell =
+            '<td class="plugin_fanfields3_order_gripcol"><span class="plugin_fanfields3_order_handle" title="Drag to reorder">&#9776;</span></td>';
+        }
+      }
+
+
+      html += '<tr class="' + trClass + '" data-guid="' + fp.guid + '">';
+      html += moveCell;
+      html += '<td class="plugin_fanfields3_order_idx">' + idx + '</td>';
+      html += '<td>' + title + (isAnchor ? ' <span class="plugin_fanfields3_italic">(' + anchorLabel + ')</span>' : '') + '</td>';
+      html += '<td style="text-align:right;">' + keys + '</td>';
+      html += '<td style="text-align:right;">' + out + '</td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table>';
+    html += '<div class="plugin_fanfields3_order_hint">';
+    if (isHerringbone) {
+      html += 'Manual reordering isn\'t available yet in Herringbone mode &mdash; anchors A and B are listed first, followed by the chain.';
+    } else {
+      if (isMobile) {
+        html += 'Use ▲/▼ to change visit order. First row (anchor) is fixed.<br>';
+      } else {
+        html += 'Drag &amp; drop rows to change visit order. First row (anchor) is fixed.<br>';
+      }
+      html += 'Click <b>Apply</b> to use this order for the fanfield calculation.';
+    }
+    html += '</div>';
+    html += '<div style="margin-top:5px;text-align:right;">';
+    html += '  <button id="plugin_fanfields3_order_path">Path</button> ';
+    html += '  <button id="plugin_fanfields3_order_reset" >Reset</button> ';
+    if (!isHerringbone) {
+      html += '  <button id="plugin_fanfields3_order_apply" >Apply</button>';
+    }
+    html += '</div>';
+    return html;
+  };
+
   thisplugin.showManageOrderDialog = function () {
     var that = thisplugin;
     let manageOrderDialogTitle = 'Fan Fields 3 - Manage Portal Order';
@@ -3199,79 +3298,12 @@ function wrapper(plugin_info) {
       return;
     }
 
-    function buildTableHTML() {
-      var html = '';
-      html += '<table id="plugin_fanfields3_order_table" class="plugin_fanfields3_order_table">';
-      html += '<thead><tr>';
-      // html += '<th class="plugin_fanfields3_order_gripcol" style="width:22px;"></th>';
-      html += '<th class="plugin_fanfields3_order_move_col" style="width:36px;"></th>';
-      html += '<th style="width:30px;">#</th>';
-      html += '<th>Portal</th>';
-      html += '<th style="width:60px;">Keys</th>';
-      html += '<th style="width:60px;">Links out</th>';
-      html += '</tr></thead><tbody>';
-
-      that.sortedFanpoints.forEach(function (fp, idx) {
-        var p = fp.portal;
-        var title = (p && p.options && p.options.data && p.options.data.title) ? p.options.data.title : 'unknown title';
-
-        var keys = (fp.incomingValidCount !== undefined) ? fp.incomingValidCount : (fp.incoming ? fp.incoming.length : 0);
-        var out = (fp.outgoingValidCount !== undefined) ? fp.outgoingValidCount : (fp.outgoing ? fp.outgoing.length : 0);
-
-        var isAnchor = (fp.guid === that.startingpointGUID);
-        var trClass = isAnchor ? 'plugin_fanfields3_order_anchor' : 'plugin_fanfields3_order_row';
-
-        // Grip/Move column: handle for normal rows, arrows for mobile, anchor icon for the pinned row.
-        var moveCell = '';
-
-        if (isAnchor) {
-          moveCell =
-            '<td class="plugin_fanfields3_order_gripcol"><span class="plugin_fanfields3_order_anchor_icon" title="Anchor row">&#9875;</span></td>';
-        } else {
-          if (isMobile) {
-            moveCell = '<td class="plugin_fanfields3_order_move_col">' +
-              '<button class="plugin_fanfields3_order_move plugin_fanfields3_order_move_up" title="Move up">&#9650;</button>' +
-              '<button class="plugin_fanfields3_order_move plugin_fanfields3_order_move_down" title="Move down">&#9660;</button>' +
-              '</td>';
-          } else {
-            moveCell =
-              '<td class="plugin_fanfields3_order_gripcol"><span class="plugin_fanfields3_order_handle" title="Drag to reorder">&#9776;</span></td>';
-          }
-        }
-
-
-        html += '<tr class="' + trClass + '" data-guid="' + fp.guid + '">';
-        html += moveCell;
-        html += '<td class="plugin_fanfields3_order_idx">' + idx + '</td>';
-        html += '<td>' + title + (isAnchor ? ' <span class="plugin_fanfields3_italic">(anchor)</span>' : '') + '</td>';
-        html += '<td style="text-align:right;">' + keys + '</td>';
-        html += '<td style="text-align:right;">' + out + '</td>';
-        html += '</tr>';
-      });
-
-      html += '</tbody></table>';
-      html += '<div class="plugin_fanfields3_order_hint">';
-      if (isMobile) {
-        html += 'Use ▲/▼ to change visit order. First row (anchor) is fixed.<br>';
-      } else {
-        html += 'Drag &amp; drop rows to change visit order. First row (anchor) is fixed.<br>';
-      }
-      html += 'Click <b>Apply</b> to use this order for the fanfield calculation.';
-      html += '</div>';
-      html += '<div style="margin-top:5px;text-align:right;">';
-      html += '  <button id="plugin_fanfields3_order_path">Path</button> ';
-      html += '  <button id="plugin_fanfields3_order_reset" >Reset</button> ';
-      html += '  <button id="plugin_fanfields3_order_apply" >Apply</button>';
-      html += '</div>';
-      return html;
-    }
-
     var width = 450;
     thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
     if (that.MaxDialogWidth < width) width = that.MaxDialogWidth;
 
     dialog({
-      html: '<div id="plugin_fanfields3_order_dialog_inner">' + buildTableHTML() + '</div>',
+      html: '<div id="plugin_fanfields3_order_dialog_inner">' + thisplugin.buildManageOrderTableHTML() + '</div>',
       id: 'plugin_fanfields3_order_dialog',
       title: manageOrderDialogTitle,
       width: width,
@@ -3280,6 +3312,7 @@ function wrapper(plugin_info) {
 
     function initDragAndButtons() {
       var $tbody = $('#plugin_fanfields3_order_table tbody');
+      var isHerringbone = that.fieldMode === that.fieldModeENUM.HERRINGBONE;
 
       function renumberRows() {
         // Update the "#" column to match the current DOM order.
@@ -3333,76 +3366,82 @@ function wrapper(plugin_info) {
       // Destroy old sortable if the dialog is rebuilt.
       if ($tbody.data('ui-sortable')) $tbody.sortable('destroy');
 
-      pinAnchorRow();
-      renumberRows();
+      if (isHerringbone) {
+        // No manual reordering yet in Herringbone mode (see buildManageOrderTableHTML) -- just
+        // keep the "#" column in sync, nothing to drag.
+        renumberRows();
+      } else {
+        pinAnchorRow();
+        renumberRows();
 
-      $tbody.sortable({
-        // Only non-anchor rows are draggable.
-        items: '> tr.plugin_fanfields3_order_row',
-        handle: '.plugin_fanfields3_order_handle',
-        axis: 'y',
-        helper: 'clone',
-        forcePlaceholderSize: true,
-        placeholder: 'plugin_fanfields3_order_sort_placeholder',
+        $tbody.sortable({
+          // Only non-anchor rows are draggable.
+          items: '> tr.plugin_fanfields3_order_row',
+          handle: '.plugin_fanfields3_order_handle',
+          axis: 'y',
+          helper: 'clone',
+          forcePlaceholderSize: true,
+          placeholder: 'plugin_fanfields3_order_sort_placeholder',
 
-        start: function (e, ui) {
+          start: function (e, ui) {
 
-          if (that.showOrderPath) {
-            that.setOrderPathActive(false);
-            $('#plugin_fanfields3_order_path')
-              .text('Path');
-          }
-
-          // Keep column widths stable while dragging.
-          ui.helper.children()
-            .each(function (i) {
-              $(this)
-                .width(ui.item.children()
-                  .eq(i)
-                  .width());
-            });
-
-          // Make placeholder span the full row width.
-          var colCount = ui.item.children('td,th')
-            .length;
-          ui.placeholder
-            .addClass('plugin_fanfields3_order_sort_placeholder')
-            .html('<td colspan="' + colCount + '">&nbsp;</td>');
-
-          // Prevent placeholder from going above the anchor row.
-          var $anchor = $tbody.find('> tr.plugin_fanfields3_order_anchor');
-          if ($anchor.length && ui.placeholder.index() === 0) {
-            ui.placeholder.insertAfter($anchor);
-          }
-        },
-
-        change: function (e, ui) {
-          // Prevent dropping above the anchor row.
-          var $anchor = $tbody.find('> tr.plugin_fanfields3_order_anchor');
-          if ($anchor.length && ui.placeholder.index() === 0) {
-            ui.placeholder.insertAfter($anchor);
-          }
-        },
-
-        update: function () {
-          pinAnchorRow();
-          renumberRows();
-        }
-      });
-
-      if (isMobile) {
-        $tbody
-          .off('click.plugin_fanfields3_order_move')
-          .on('click.plugin_fanfields3_order_move', '.plugin_fanfields3_order_move', function () {
-            var $row = $(this)
-              .closest('tr');
-            if ($(this)
-              .hasClass('plugin_fanfields3_order_move_up')) {
-              moveRow($row, 'up');
-            } else {
-              moveRow($row, 'down');
+            if (that.showOrderPath) {
+              that.setOrderPathActive(false);
+              $('#plugin_fanfields3_order_path')
+                .text('Path');
             }
-          });
+
+            // Keep column widths stable while dragging.
+            ui.helper.children()
+              .each(function (i) {
+                $(this)
+                  .width(ui.item.children()
+                    .eq(i)
+                    .width());
+              });
+
+            // Make placeholder span the full row width.
+            var colCount = ui.item.children('td,th')
+              .length;
+            ui.placeholder
+              .addClass('plugin_fanfields3_order_sort_placeholder')
+              .html('<td colspan="' + colCount + '">&nbsp;</td>');
+
+            // Prevent placeholder from going above the anchor row.
+            var $anchor = $tbody.find('> tr.plugin_fanfields3_order_anchor');
+            if ($anchor.length && ui.placeholder.index() === 0) {
+              ui.placeholder.insertAfter($anchor);
+            }
+          },
+
+          change: function (e, ui) {
+            // Prevent dropping above the anchor row.
+            var $anchor = $tbody.find('> tr.plugin_fanfields3_order_anchor');
+            if ($anchor.length && ui.placeholder.index() === 0) {
+              ui.placeholder.insertAfter($anchor);
+            }
+          },
+
+          update: function () {
+            pinAnchorRow();
+            renumberRows();
+          }
+        });
+
+        if (isMobile) {
+          $tbody
+            .off('click.plugin_fanfields3_order_move')
+            .on('click.plugin_fanfields3_order_move', '.plugin_fanfields3_order_move', function () {
+              var $row = $(this)
+                .closest('tr');
+              if ($(this)
+                .hasClass('plugin_fanfields3_order_move_up')) {
+                moveRow($row, 'up');
+              } else {
+                moveRow($row, 'down');
+              }
+            });
+        }
       }
 
       // Rebind Reset and Apply buttons
@@ -3415,7 +3454,7 @@ function wrapper(plugin_info) {
 
 
           $('#plugin_fanfields3_order_dialog_inner')
-            .html(buildTableHTML());
+            .html(thisplugin.buildManageOrderTableHTML());
           initDragAndButtons();
 
           if (that.showOrderPath) {
@@ -4513,6 +4552,17 @@ function wrapper(plugin_info) {
     thisplugin.fieldMode = (thisplugin.fieldMode === thisplugin.fieldModeENUM.FAN)
       ? thisplugin.fieldModeENUM.HERRINGBONE
       : thisplugin.fieldModeENUM.FAN;
+
+    // Reset order/link-flip state (ghi#23) -- a relocation, manual flip or Reroute order
+    // computed for the other mode's plan shape has no meaning here.
+    thisplugin.manualOrderGuids = null;
+    thisplugin.manualLinkFlips = {};
+    thisplugin.reconciledFanLinkKeys = {};
+    thisplugin.relocatedForLessWalkingGuids = {};
+    thisplugin.displayOrderGuids = null;
+    thisplugin.clearRouteOrder();
+    thisplugin.requestLinkOrderRecompute();
+
     thisplugin.updateFieldModeButton();
     thisplugin.saveOptionsDefault();
     thisplugin.delayedUpdateLayer(0.2, true);
@@ -7763,35 +7813,112 @@ function wrapper(plugin_info) {
     return best;
   };
 
+  // Converts a herringbone plan (see buildHerringbonePlan) into the SAME fp-shaped structure
+  // buildFanPlan produces for the single-anchor fan field -- {point, portal, guid, incoming,
+  // outgoing, outgoingMeta} per portal -- so every generic consumer that already reads
+  // thisplugin.sortedFanpoints (Task List, Statistics, Manage Portal Order, Blockers, Reroute,
+  // the PDF/Walk sim exports, simulateWalk/validateUnderFieldLinks) works for a herringbone plan
+  // without any changes of its own. thisplugin.startingpointGUID is deliberately left untouched
+  // (stays "") -- that's what keeps the fan-only code paths that key off it (outbound/SBUL
+  // reconciliation, the "Less walking" link-order optimizer) safely no-op'd for herringbone.
+  //
+  // Walk order: [anchor B, anchor A, chain...]. buildHerringboneChain's own convention is that a
+  // link's "guidA" always throws to its "guidB" (needing guidB's key already), and the base link
+  // is guidA=anchor A -> guidB=anchor B -- so anchor B must be visited (and keyed) first; anchor
+  // A follows, and only then does the chain start, since every chain portal's own toA/toB links
+  // need both anchors' keys already in hand.
+  //
+  // Each triangle the chain builds up (see buildHerringboneChain's own comment) is attached, as
+  // a "creatingFieldsWith" third point, to ONE of its 3 sides -- simulateWalk registers a
+  // declared field under all 3 of its sides' own undirected keys regardless of which one carries
+  // the annotation, crediting whichever is actually thrown last. The very first triangle (A, B,
+  // chain[0]) is attached to the base link; every later pair of triangles a chain portal closes
+  // with its predecessor (one via anchor A, one via anchor B) is attached -- as TWO third points
+  // at once, the same way a fan field's own jet link closes two fields with a single throw -- to
+  // that portal's own link back to its predecessor.
+  thisplugin.buildHerringboneFanpoints = function (plan) {
+    function makeFp(guid, point) {
+      return {
+        point: point,
+        portal: window.portals[guid],
+        bearing: 0,
+        guid: guid,
+        incoming: [],
+        outgoing: [],
+        outgoingMeta: {},
+        is_startpoint: false
+      };
+    }
+
+    function link(throwerFp, targetFp, thirdPoints) {
+      throwerFp.outgoing.push(targetFp);
+      targetFp.incoming.push(throwerFp);
+      throwerFp.outgoingMeta[targetFp.guid] = { creatingFieldsWith: thirdPoints || [] };
+    }
+
+    var anchorA = makeFp(plan.anchorGuidA, plan.anchorPointA);
+    var anchorB = makeFp(plan.anchorGuidB, plan.anchorPointB);
+    var chainFps = plan.chain.map(function (c) { return makeFp(c.guid, c.point); });
+
+    link(anchorA, anchorB, chainFps.length ? [chainFps[0].point] : []);
+
+    chainFps.forEach(function (fp, i) {
+      link(fp, anchorA, []);
+      link(fp, anchorB, []);
+      if (i > 0) link(fp, chainFps[i - 1], [anchorA.point, anchorB.point]);
+    });
+
+    return {
+      sortedFanpoints: [anchorB, anchorA].concat(chainFps),
+      n: chainFps.length + 2
+    };
+  };
+
   // Herringbone counterpart of the fan-specific block inside updateLayer() below: finds the
-  // best anchor pair/chain for the current portal set and draws it. Called from updateLayer()
-  // itself once the portal set (fanpoints) and exclusions are settled, in place of
-  // buildFanPlan/drawPlan -- see thisplugin.fieldMode.
+  // best anchor pair/chain for the current portal set, converts it into the shared
+  // sortedFanpoints shape (see buildHerringboneFanpoints) so every generic consumer (Task List,
+  // Statistics, Manage Portal Order, Blockers, Reroute, exports) picks it up, and draws it.
+  // Called from updateLayer() itself once the portal set (fanpoints) and exclusions are settled,
+  // in place of buildFanPlan/drawPlan -- see thisplugin.fieldMode.
   thisplugin.updateHerringboneLayer = function (fanpoints, respectLinks) {
     thisplugin.triangles = [];
     thisplugin.donelinks = [];
     thisplugin.links = [];
     thisplugin.n = 0;
     thisplugin.centerKeys = 0;
+    thisplugin.sortedFanpoints = [];
+
+    // The anchor-pair search below runs synchronously (see buildHerringbonePlan) and is already
+    // settled by the time this returns -- nothing left to wait for, unlike the fan field's own
+    // asynchronous orientation search this flag otherwise tracks.
+    thisplugin._orientationSearchPending = false;
 
     thisplugin.herringbonePlan = thisplugin.buildHerringbonePlan(fanpoints, { respectLinks: respectLinks });
 
     if (thisplugin.herringbonePlan) {
+      var converted = thisplugin.buildHerringboneFanpoints(thisplugin.herringbonePlan);
+      thisplugin.sortedFanpoints = converted.sortedFanpoints;
       thisplugin.links = thisplugin.herringbonePlan.links;
       thisplugin.donelinks = thisplugin.herringbonePlan.links;
       thisplugin.triangles = thisplugin.herringbonePlan.triangles;
-      thisplugin.n = thisplugin.herringbonePlan.chain.length + 2;
+      thisplugin.n = converted.n;
     }
 
+    // Issue #96 (under-field link distance) applies here too, and is what Task List's per-link
+    // warning icon and valid link/field counts read.
+    thisplugin.validateUnderFieldLinks();
+
     thisplugin.drawHerringbonePlan(thisplugin.herringbonePlan);
+    thisplugin.refreshTaskListIfOpen();
+    thisplugin.refreshStatisticsIfOpen();
+    thisplugin.lockIfPlanComplete();
   };
 
   // Draws a herringbone plan (see buildHerringbonePlan) directly: every link in the same solid
   // purple drawPlan uses for the fan field, every field as the same translucent red fill, and a
   // simple ANCHOR A / ANCHOR B / 1, 2, 3… label on each portal so the chosen anchors and chain
-  // order are visible on the map. Deliberately independent from drawPlan: it doesn't touch the
-  // walk order, blockers, Task List or Statistics, which still read the fan field's own
-  // sortedFanpoints shape that herringbone mode never populates (see updateHerringboneLayer).
+  // order are visible on the map. Deliberately independent from drawPlan, which the fan field's
+  // single-anchor plan still uses for its own map rendering/start label.
   thisplugin.drawHerringbonePlan = function (plan) {
     thisplugin.linksLayerGroup.clearLayers();
     thisplugin.fieldsLayerGroup.clearLayers();
@@ -8780,7 +8907,15 @@ function wrapper(plugin_info) {
       thisplugin.linksLayerGroup.clearLayers();
       thisplugin.fieldsLayerGroup.clearLayers();
       thisplugin.numbersLayerGroup.clearLayers();
-      thisplugin.drawPlan();
+      // Herringbone keeps its own distinct colored-by-kind/ANCHOR A+B rendering (drawPlan()'s
+      // own start label and link styling are fan-only) -- this path is also what Reroute and a
+      // live in-game change (while Locked) redraw through, so it needs the same branch
+      // updateHerringboneLayer() itself uses.
+      if (thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE) {
+        thisplugin.drawHerringbonePlan(thisplugin.herringbonePlan);
+      } else {
+        thisplugin.drawPlan();
+      }
     } else {
       thisplugin.refreshTaskListIfOpen();
       thisplugin.refreshStatisticsIfOpen();

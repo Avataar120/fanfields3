@@ -8,7 +8,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPluginSandbox, FakePoint, toHostArray } = require('./support/pluginSandbox');
+const { createPluginSandbox, FakePoint, FakeLatLng, toHostArray } = require('./support/pluginSandbox');
 const { loadFixturePortals, wirePlanInputs } = require('./support/planFixtures');
 
 function fanpointsFrom(obj) {
@@ -205,13 +205,18 @@ test('buildHerringbonePlan: fewer than 3 portals in the selection -> no plan', (
   assert.equal(thisplugin.buildHerringbonePlan(fanpoints), null);
 });
 
-test('updateLayer() in Herringbone mode draws its own plan and leaves the fan field\'s own state empty', () => {
-  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 6);
+// Runs the real herringbone pipeline (wirePlanInputs + updateLayer() in HERRINGBONE mode) for
+// `portals`, the same way updateLayer() itself drives it once a polygon is drawn -- used by
+// every test below that needs a real, non-trivial plan rather than a hand-built one.
+function buildHerringboneForFixture(portals) {
   const sandbox = createPluginSandbox();
   const { thisplugin } = sandbox;
   wirePlanInputs(sandbox, portals);
-
   thisplugin.fieldMode = thisplugin.fieldModeENUM.HERRINGBONE;
+  // thisplugin._mapDataLoading defaults to true (real IITC only clears it via its own
+  // mapDataRefreshEnd hook, wired up in setup() -- not called here); lockIfPlanComplete()
+  // otherwise refuses to lock a plan it still thinks the map is loading for.
+  thisplugin._mapDataLoading = false;
 
   const realConsoleLog = console.log;
   console.log = function () {};
@@ -221,11 +226,188 @@ test('updateLayer() in Herringbone mode draws its own plan and leaves the fan fi
     console.log = realConsoleLog;
   }
 
+  return sandbox;
+}
+
+test('updateLayer() in Herringbone mode now also populates the shared plan state (Task List/Statistics/Manage Portal Order)', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 6);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+
   assert.ok(thisplugin.herringbonePlan, 'a herringbone plan must have been computed for 6 real portals');
+  const plan = thisplugin.herringbonePlan;
   assert.equal(thisplugin.herringbonePlan.chain.length + 2 <= portals.length, true);
-  assert.equal(thisplugin.sortedFanpoints.length, 0,
-    'the fan field\'s own sortedFanpoints must stay empty -- Task List/Statistics are not wired up to herringbone mode yet');
-  assert.equal(thisplugin.links, thisplugin.herringbonePlan.links);
+  assert.equal(thisplugin.links, plan.links);
+  assert.equal(thisplugin.donelinks, plan.links);
+  assert.equal(thisplugin.triangles, plan.triangles);
+
+  // sortedFanpoints is now populated, in walk order [anchor B, anchor A, chain...] -- anchor B
+  // receives the base link (A throws to B), so it must be visited/keyed first; see
+  // buildHerringboneFanpoints's own comment for why.
+  assert.equal(thisplugin.sortedFanpoints.length, plan.chain.length + 2);
+  const walkGuids = toHostArray(thisplugin.sortedFanpoints).map(function (fp) { return fp.guid; });
+  assert.deepEqual(walkGuids, [plan.anchorGuidB, plan.anchorGuidA].concat(chainGuids(plan)));
+
+  // A complete plan locks itself, same as the fan field does, instead of recalculating on
+  // every pan/zoom.
+  assert.equal(thisplugin.is_locked, true);
+});
+
+test('buildHerringboneFanpoints: converts a plan into the shared sortedFanpoints shape, with the right precedence and field crediting', () => {
+  const { thisplugin } = createPluginSandbox();
+  const fanpoints = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3]
+  });
+
+  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', null);
+  const converted = thisplugin.buildHerringboneFanpoints(plan);
+
+  const order = toHostArray(converted.sortedFanpoints);
+  assert.deepEqual(order.map(function (fp) { return fp.guid; }), ['B', 'A', 'C', 'D', 'E']);
+  assert.equal(converted.n, plan.chain.length + 2);
+
+  const byGuid = {};
+  order.forEach(function (fp) { byGuid[fp.guid] = fp; });
+
+  function outgoingGuids(guid) {
+    return toHostArray(byGuid[guid].outgoing).map(function (fp) { return fp.guid; }).sort();
+  }
+
+  // Base link: A throws to B (needs B's key already) -- B is visited first, A never throws.
+  // B also receives every chain portal's own "toB" link, same as A receives their "toA" --
+  // that's what makes B the busiest portal (n+1 incoming vs. A's n).
+  assert.deepEqual(outgoingGuids('A'), ['B']);
+  assert.deepEqual(toHostArray(byGuid.B.incoming).map(function (fp) { return fp.guid; }).sort(),
+    ['A', 'C', 'D', 'E']);
+  assert.equal(byGuid.B.outgoing.length, 0, 'an anchor never throws in this plan, only receives');
+
+  // Every chain portal throws to both anchors, plus (for all but the first) its predecessor.
+  assert.deepEqual(outgoingGuids('C'), ['A', 'B']);
+  assert.deepEqual(outgoingGuids('D'), ['A', 'B', 'C']);
+  assert.deepEqual(outgoingGuids('E'), ['A', 'B', 'D']);
+
+  // Running the walk order through simulateWalk must reproduce exactly plan.triangles.length
+  // fields -- each triangle's creatingFieldsWith annotation (attached to just one of its 3
+  // sides) must fan out correctly to credit every one of them, with no link invalidated.
+  const sim = thisplugin.simulateWalk(order);
+  assert.equal(sim.triangles.length, plan.triangles.length);
+  assert.equal(Object.keys(sim.invalid).length, 0, 'none of these short links should be invalid-under-field');
+});
+
+test('buildTaskListHTML: renders a Herringbone plan\'s anchors and chain, without the inert per-link flip button', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+  const plan = thisplugin.herringbonePlan;
+  assert.ok(plan, 'a plan must have been found for this fixture slice');
+
+  const html = thisplugin.buildTaskListHTML();
+
+  toHostArray(thisplugin.sortedFanpoints).forEach(function (fp) {
+    assert.ok(html.includes('plugin_fanfields3_exportText_' + fp.guid),
+      'every walk portal (both anchors and the chain) must get its own Task List row');
+  });
+  assert.ok(!html.includes('plugin_fanfields3_link_flip_btn'),
+    'the manual flip button has no effect on a Herringbone plan\'s own build and must not be shown');
+  assert.ok(html.includes('plugin_fanfields3_reset_link_flips_btn'),
+    '"Reset link orders" stays -- it can still undo a Reroute order');
+});
+
+test('buildStatisticsHTML: shows a computed Herringbone plan instead of "No Fanfield plan calculated yet"', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+
+  const html = thisplugin.buildStatisticsHTML();
+
+  assert.ok(!html.includes('No Fanfield plan calculated yet'));
+  assert.ok(html.includes(String(thisplugin.donelinks.length)), 'the link count must come from the herringbone plan');
+});
+
+test('buildManageOrderTableHTML: shows both anchors (fixed, labelled individually) and no manual reordering for Herringbone', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+  const plan = thisplugin.herringbonePlan;
+  assert.ok(plan && plan.chain.length >= 1, 'this fixture slice must produce at least one chain portal');
+
+  const html = thisplugin.buildManageOrderTableHTML();
+
+  assert.ok(html.includes('(anchor A)'));
+  assert.ok(html.includes('(anchor B)'));
+  assert.equal((html.match(/plugin_fanfields3_order_anchor_icon/g) || []).length, 2,
+    'exactly the 2 anchor rows get the pinned-row icon');
+  assert.ok(!html.includes('plugin_fanfields3_order_handle'),
+    'no drag handle -- Herringbone has no manual reordering yet');
+  assert.ok(!html.includes('plugin_fanfields3_order_move_up'),
+    'no mobile move buttons either');
+  assert.ok(!html.includes('id="plugin_fanfields3_order_apply"'),
+    'Apply would silently do nothing for a Herringbone plan, so it must not be offered');
+  assert.ok(html.includes('id="plugin_fanfields3_order_reset"'), 'Reset stays (undoes a Reroute order)');
+  assert.ok(html.includes('id="plugin_fanfields3_order_path"'), 'Path stays (just previews the walk order)');
+  assert.ok(html.includes('Manual reordering isn\'t available yet in Herringbone mode'));
+});
+
+test('computeBlockerPlan: tolerates a Herringbone plan and flags a link crossing it as a blocker', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin, window } = sandbox;
+  const plan = thisplugin.herringbonePlan;
+  assert.ok(plan, 'a plan must have been found for this fixture slice');
+
+  const baseLink = toHostArray(plan.links).filter(function (l) { return l.kind === 'base'; })[0];
+  assert.ok(baseLink, 'a herringbone plan always has its own base (anchor-to-anchor) link');
+
+  // A segment perpendicular to, and centered on, the base link's own midpoint -- guaranteed to
+  // cross it (not just share an endpoint, which thisplugin.intersects treats as "not crossing").
+  const dx = baseLink.b.x - baseLink.a.x;
+  const dy = baseLink.b.y - baseLink.a.y;
+  const midX = (baseLink.a.x + baseLink.b.x) / 2;
+  const midY = (baseLink.a.y + baseLink.b.y) / 2;
+  const p1 = new FakePoint(midX - dy * 0.1, midY + dx * 0.1);
+  const p2 = new FakePoint(midX + dy * 0.1, midY - dx * 0.1);
+
+  window.links['test-crossing-blocker'] = {
+    getLatLngs() { return [window.map.unproject(p1, 17), window.map.unproject(p2, 17)]; },
+    options: { team: window.TEAM_ENL, data: { oGuid: 'blockerPortalA', dGuid: 'blockerPortalB' } }
+  };
+  // Rebuild thisplugin.intelLinks/locations from the live window.links/portals, same as a
+  // real in-game data refresh would -- without recalculating the plan itself.
+  thisplugin.refreshLiveGameData();
+
+  const blockerPlan = thisplugin.computeBlockerPlan();
+
+  assert.ok(blockerPlan.blockers.length >= 1, 'the crossing link must be detected as a blocker');
+  assert.ok(Array.isArray(blockerPlan.stops));
+  assert.ok(typeof blockerPlan.extraDistance === 'number');
+});
+
+test('computeRouteOrder: produces a valid reordering (every walk guid exactly once) of a Herringbone plan', () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+
+  const walkGuids = toHostArray(thisplugin.sortedFanpoints).map(function (fp) { return fp.guid; });
+  const result = thisplugin.computeRouteOrder(new FakeLatLng(0, 0));
+
+  assert.ok(result, 'everything is still pending in a fresh sandbox (nothing captured/keyed yet)');
+  assert.equal(result.order.length, walkGuids.length);
+  assert.deepEqual(toHostArray(result.order).slice().sort(), walkGuids.slice().sort(),
+    'the reordering is a permutation of the exact same walk, nothing added or dropped');
+});
+
+test('rerouteFromPlayerPosition: completes and redraws a Herringbone plan without throwing', async () => {
+  const portals = loadFixturePortals('orly-76-portals.json').slice(0, 7);
+  const sandbox = buildHerringboneForFixture(portals);
+  const { thisplugin } = sandbox;
+
+  await new Promise(function (resolve) {
+    thisplugin.rerouteFromPlayerPosition(resolve);
+  });
+
+  assert.ok(thisplugin.routeOrderGuids, 'a Reroute order must have been computed and kept');
+  assert.equal(thisplugin.routeOrderGuids.length, thisplugin.sortedFanpoints.length);
 });
 
 test('buildHerringbonePlan: on a real, dense 76-portal cluster, chains in a double-digit number of portals with zero crossings, well within budget', () => {
