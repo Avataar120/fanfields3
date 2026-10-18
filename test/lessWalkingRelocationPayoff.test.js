@@ -37,6 +37,16 @@ function detourCost(dist, prevGuid, guid, nextGuid) {
       const plan = await buildPlan(portals, { mode: mode, anchorGuid: anchorGuid });
       const thisplugin = plan.thisplugin;
 
+      // Outbound/RADIATING: thisplugin.buildPhasedOutboundWalk's own Phase 1 (capture sweep) and
+      // Phase 3 (chain throws, see its own comment) searches supersede "Less walking"'s own
+      // relocations for every portal either one places, clearing relocatedForLessWalkingGuids for
+      // all of them the same way the old anchor-prefix search already did -- so this set is
+      // typically empty for outbound now, and this test is a no-op there (nothing left for "Less
+      // walking" itself to still be answerable for). Should a portal's guid still show up here
+      // (the anchor never does; a doubled capture/throw portal always gets de-flagged by both of
+      // its stops), finalOrderGuids.indexOf(guid) below resolves to its FIRST occurrence in
+      // plan.walkOrder -- the capture stop, for a doubled portal -- consistent with how
+      // thisplugin.buildTaskListHTML's own displayOrderIndexByGuid resolves the same ambiguity.
       const relocated = Object.keys(thisplugin.relocatedForLessWalkingGuids || {});
       if (!relocated.length) return; // nothing relocated for this anchor/mode -- nothing to check
 

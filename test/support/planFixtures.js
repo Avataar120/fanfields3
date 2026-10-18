@@ -116,6 +116,12 @@ async function buildPlan(fixturePortals, options) {
   // un-optimized, bearing-sorted prefix instead of the real algorithm.
   if (options.mode === 'outbound') {
     await new Promise(function (resolve) { setTimeout(resolve, 20); });
+    // thisplugin.ensureOutboundPositionTracking (started by buildPhasedOutboundWalk/
+    // moveAnchorAfterItsTargetsIfOutbound while RADIATING) leaves a 60s setInterval running.
+    // Nothing in a test needs it live past this point, and node --test otherwise waits out that
+    // whole interval before it can exit cleanly once every test itself has finished.
+    clearInterval(thisplugin._outboundPositionTimer);
+    thisplugin._outboundPositionTimer = null;
   }
 
   return {

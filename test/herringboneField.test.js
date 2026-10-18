@@ -582,6 +582,102 @@ test('buildHerringboneFanpoints: outbound reverses every link direction and walk
   assert.equal(Object.keys(sim.invalid).length, 0);
 });
 
+// Regression for the real-game mismatch reported against Fresque de l'écomobilité (Antibes,
+// 2026-10-18 session, Outbound Herringbone): the Task List starred most of that anchor's own
+// links with 2 fields each, but the intel log showed only 1 Control Field message right after
+// almost every one of them -- only a few really closed 2 at once. Root cause: in outbound mode
+// the chain link (predecessor -> successor) is always thrown FIRST, well before either anchor
+// has thrown anything, so it can never be the link that completes a triangle -- yet
+// buildHerringboneFanpoints used to annotate it with both anchors as third points (as if it were
+// the inbound chain link, which genuinely does close 2 fields at once, see the fanpointsFrom test
+// above with `{}` / no `outbound`). The two real closing links are each anchor's OWN link to that
+// chain portal, each completing exactly one of the two triangles, never both.
+test('buildHerringboneFanpoints: outbound annotates each triangle on the link that ACTUALLY completes it, not the chain link that is always thrown first', () => {
+  const { thisplugin } = createPluginSandbox();
+  const fanpoints = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3]
+  });
+
+  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', { outbound: true });
+  const converted = thisplugin.buildHerringboneFanpoints(plan);
+  const order = toHostArray(converted.sortedFanpoints);
+  const chainGuidsInOrder = chainGuids(plan); // ['C', 'D', 'E']
+  assert.ok(chainGuidsInOrder.length >= 3, 'this fixture must chain in enough portals to cover both the first and a later chain step');
+
+  const byGuid = {};
+  order.forEach(function (fp) { byGuid[fp.guid] = fp; });
+  function rawCount(fromGuid, toGuid) {
+    return byGuid[fromGuid].outgoingMeta[toGuid].creatingFieldsWith.length;
+  }
+
+  // The chain-to-chain links (thrown first, before either anchor has thrown anything at all)
+  // must never claim to close a field -- they structurally can't, in outbound mode.
+  for (let i = 1; i < chainGuidsInOrder.length; i++) {
+    assert.equal(rawCount(chainGuidsInOrder[i - 1], chainGuidsInOrder[i]), 0,
+      'chain link ' + chainGuidsInOrder[i - 1] + '->' + chainGuidsInOrder[i] + ' must not claim any field');
+  }
+  // Nor does the base link (B -> A, thrown before B reaches any chain portal).
+  assert.equal(rawCount(plan.anchorGuidB, plan.anchorGuidA), 0);
+
+  // The very first chain portal: only anchor B's own link to it closes a field (the A-B-chain0
+  // triangle); anchor A's own link to it closes nothing (thrown before the base link even exists).
+  assert.equal(rawCount(plan.anchorGuidA, chainGuidsInOrder[0]), 0);
+  assert.equal(rawCount(plan.anchorGuidB, chainGuidsInOrder[0]), 1);
+
+  // Every later chain portal: BOTH anchors' own links to it each close exactly one field (never
+  // two at once on a single link) -- this is the exact pattern the real game log showed.
+  for (let i = 1; i < chainGuidsInOrder.length; i++) {
+    assert.equal(rawCount(plan.anchorGuidA, chainGuidsInOrder[i]), 1,
+      'anchor A\'s own link to chain portal ' + i + ' must close exactly 1 field, not 2');
+    assert.equal(rawCount(plan.anchorGuidB, chainGuidsInOrder[i]), 1,
+      'anchor B\'s own link to chain portal ' + i + ' must close exactly 1 field, not 2');
+  }
+
+  // The raw annotation must match reality on its own, without depending on simulateWalk's
+  // "credit whichever side is actually thrown last" fallback -- every directed link's raw count
+  // must already equal what simulateWalk independently computes for it.
+  const sim = thisplugin.simulateWalk(order);
+  order.forEach(function (fp) {
+    toHostArray(fp.outgoing).forEach(function (target) {
+      const dkey = thisplugin.getDirectedLinkKey(fp.guid, target.guid);
+      assert.equal(rawCount(fp.guid, target.guid), sim.fieldsByDirectedLink[dkey] || 0,
+        'raw creatingFieldsWith for ' + fp.guid + '->' + target.guid + ' must match the link\'s real, simulated field count');
+    });
+  });
+  assert.equal(sim.triangles.length, plan.triangles.length);
+});
+
+// Inbound keeps the opposite, still-correct shape: the chain link genuinely closes both
+// triangles at once (both anchors have already thrown everything by the time any chain link is
+// thrown), so its own raw annotation legitimately carries both third points.
+test('buildHerringboneFanpoints: inbound\'s chain link genuinely closes 2 fields at once, unlike outbound\'s', () => {
+  const { thisplugin } = createPluginSandbox();
+  const fanpoints = fanpointsFrom({
+    A: [0, 0], B: [100, 0],
+    C: [20, 20], D: [50, 10], E: [80, 3]
+  });
+
+  const plan = thisplugin.buildHerringboneChain(fanpoints, 'A', 'B', null);
+  const converted = thisplugin.buildHerringboneFanpoints(plan);
+  const order = toHostArray(converted.sortedFanpoints);
+  const chainGuidsInOrder = chainGuids(plan);
+  assert.ok(chainGuidsInOrder.length >= 2);
+
+  const byGuid = {};
+  order.forEach(function (fp) { byGuid[fp.guid] = fp; });
+
+  const lastChainGuid = chainGuidsInOrder[chainGuidsInOrder.length - 1];
+  const prevChainGuid = chainGuidsInOrder[chainGuidsInOrder.length - 2];
+  const meta = byGuid[lastChainGuid].outgoingMeta[prevChainGuid];
+  assert.equal(meta.creatingFieldsWith.length, 2,
+    'the last chain portal\'s own link back to its predecessor closes both the A-side and B-side triangle at once, in inbound mode');
+
+  const sim = thisplugin.simulateWalk(order);
+  const dkey = thisplugin.getDirectedLinkKey(lastChainGuid, prevChainGuid);
+  assert.equal(sim.fieldsByDirectedLink[dkey], 2);
+});
+
 test('computeHerringboneWalkDistance: inbound and outbound walk the exact same total distance for the same chain', () => {
   const { thisplugin } = createPluginSandbox();
   const fanpoints = fanpointsFrom({
