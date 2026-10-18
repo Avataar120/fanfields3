@@ -6,8 +6,10 @@
 // (reported against a real 15-portal Antibes plan, anchor "Fresque de l'écomobilité": the Task
 // List predicted 2 fields on most of the anchor's own links, but the in-game log showed only 1 for
 // most of them -- confirmed structural, not a search-quality gap, and fixed by moving the anchor
-// out of "last" into a 3-phase walk: Phase 1 (capture sweep) -> Phase 2 (the anchor, throwing
-// everything) -> Phase 3 (chain throws, ordered to maximize fields and jet-link pairing).
+// out of "last" into a 3-phase walk: Phase 1 (capture, in the fan field's own natural
+// clockwise/counterclockwise sweep order) -> Phase 2 (the anchor, throwing everything) -> Phase 3
+// (the remaining chain throws, in that SAME sweep order, which by then pairs their fields the same
+// way an ordinary CENTRALIZING fan field's own mesh links already do).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -45,7 +47,7 @@ ANCHORS_76.forEach(function (anchorGuid) {
     assertEveryKeyAvailableBeforeNeeded(toHostArray(plan.walkOrder));
   });
 
-  test('orderChainThrows (anchor ' + anchorGuid.slice(0, 8) + '): Phase 3 never reports a precedence violation', async () => {
+  test('buildPhasedOutboundWalk (anchor ' + anchorGuid.slice(0, 8) + '): Phase 3 never needs a key Phase 1 has not already collected', async () => {
     const plan = await buildPlan(portals76, { mode: 'outbound', anchorGuid: anchorGuid });
     const walk = toHostArray(plan.walkOrder);
     const anchorIdx = walk.findIndex(function (fp) { return fp.guid === anchorGuid; });
@@ -75,6 +77,30 @@ ANCHORS_76.forEach(function (anchorGuid) {
     assert.equal(sim.triangles.length, plan.triangles.length,
       'the phased walk must realize every field the core build predicted, same as before this change');
     assert.equal(Object.keys(sim.invalid).length, 0, 'no link should become impossible to throw from under a field');
+  });
+
+  test('buildPhasedOutboundWalk (anchor ' + anchorGuid.slice(0, 8) + '): EVERY jet link closes together -- a hard guarantee, not a best effort', async () => {
+    const plan = await buildPlan(portals76, { mode: 'outbound', anchorGuid: anchorGuid });
+    const { thisplugin } = plan;
+    const walk = toHostArray(plan.walkOrder);
+    const sim = thisplugin.simulateWalk(walk);
+
+    let jetLinks = 0, paired = 0;
+    walk.forEach(function (fp) {
+      toHostArray(fp.outgoing).forEach(function (target) {
+        const meta = fp.outgoingMeta[target.guid];
+        if (!(meta && meta.creatingFieldsWith && toHostArray(meta.creatingFieldsWith).length === 2)) return;
+        jetLinks++;
+        const dkey = thisplugin.getDirectedLinkKey(fp.guid, target.guid);
+        if ((sim.fieldsByDirectedLink[dkey] || 0) === 2) paired++;
+      });
+    });
+
+    assert.ok(jetLinks > 0, 'this dense fixture must have at least one jet link to exercise this guarantee');
+    assert.equal(paired, jetLinks,
+      paired + '/' + jetLinks + ' jet links closed together -- the maintainer was explicit after testing ' +
+      'an earlier version in real play: never trade away a reachable double field closure, not even for ' +
+      'walking distance. Every jet link in this plan must pair, with no exceptions.');
   });
 });
 
@@ -108,10 +134,11 @@ test('the real Antibes 15-portal plan (reported bug): jet links now pair up, whe
   assert.equal(jetLinks, 8, 'fixture/anchor must still match the reported plan');
 
   const jetPairs = plan.thisplugin.countJetPairsClosedTogether(sim, walk);
-  assert.ok(jetPairs > 0,
+  assert.equal(jetPairs, 8,
     'before this fix: 0 of 8 jet links ever closed together, proven structurally impossible under ' +
-    'the old anchor-last walk (every one of them has the anchor itself as a 3rd point). Moving the ' +
-    'anchor out of "last" must let at least some of them pair up.');
+    'the old anchor-last walk (every one of them has the anchor itself as a 3rd point). The maintainer ' +
+    'was explicit after testing an earlier, partial fix in real play: ALL 8, not just "some", since a ' +
+    'reachable double field must never be traded away for anything else (walking distance included).');
 });
 
 test('buildPhasedOutboundWalk: a doubled (capture+throw) portal gets two distinct stopKeys, tracked independently by isPortalDone', async () => {
@@ -130,11 +157,10 @@ test('buildPhasedOutboundWalk: a doubled (capture+throw) portal gets two distinc
   const guidWithTwoStops = Object.keys(byGuid).find(function (guid) { return byGuid[guid].length === 2; });
   assert.ok(guidWithTwoStops, 'at least one portal must have both its capture and throw stop present');
 
-  const [captureStop, throwStop] = byGuid[guidWithTwoStops][0].outgoing.length === 0
-    ? byGuid[guidWithTwoStops]
-    : [byGuid[guidWithTwoStops][1], byGuid[guidWithTwoStops][0]];
-  assert.equal(captureStop.outgoing.length, 0, 'the capture stop never throws anything of its own');
-  assert.ok(throwStop.outgoing.length > 0, 'the throw stop is exactly the one with its own chain link(s)');
+  const captureStop = byGuid[guidWithTwoStops].find(function (fp) { return fp.stopKey.endsWith('#1'); });
+  const throwStop = byGuid[guidWithTwoStops].find(function (fp) { return fp.stopKey.endsWith('#2'); });
+  assert.ok(captureStop && throwStop, 'a doubled portal must have exactly one #1 (capture) and one #2 (throw) stop');
+  assert.ok(throwStop.outgoing.length > 0, 'the throw stop must carry at least the deferred link(s) that required it');
 
   thisplugin.isPortalDone(captureStop, true); // mark only the capture stop as finished ("Nothing")
   assert.equal(thisplugin.isPortalDone(captureStop, false), true, 'the capture stop stays marked done');

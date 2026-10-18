@@ -522,15 +522,13 @@ function wrapper(plugin_info) {
   // preview, Google Maps navigation, Portal Route stops, bookmark order. The core algorithm
   // itself, and anything about which links/fields exist, must keep using thisplugin.sortedFanpoints.
   // A "Reroute" order (routeOrderGuids) computed on this very plan wins over both.
-  // Caches the result below (in particular the RADIATING prefix ordering, which runs a
-  // budgeted — up to OUTBOUND_PREFIX_ORDER_BUDGET_MS — local search): getDisplayOrder() is
-  // itself called many times per single redraw (Task List, map drawing, Stats, Blockers,
-  // Walk sim, ...), and without this cache each of those calls would redo that search from
-  // scratch, which is what made shift left/right (and any other anchor change) feel slow in
-  // RADIATING mode. Keyed by reference on everything the computation actually depends on:
-  // sortedFanpoints, displayOrderGuids and outboundPlayerPosition are always replaced
-  // wholesale when they change (never mutated in place — see their assignments throughout
-  // this file), so comparing references is enough to know the cached result is still valid.
+  // Caches the result below: getDisplayOrder() is itself called many times per single redraw
+  // (Task List, map drawing, Stats, Blockers, Walk sim, ...), so it's worth not rebuilding the
+  // RADIATING phase split (thisplugin.buildPhasedOutboundWalk) from scratch every single time.
+  // Keyed by reference on everything the computation actually depends on: sortedFanpoints and
+  // displayOrderGuids are always replaced wholesale when they change (never mutated in place —
+  // see their assignments throughout this file), so comparing references is enough to know the
+  // cached result is still valid.
   thisplugin._displayOrderCache = null;
 
   thisplugin.getDisplayOrder = function () {
@@ -542,8 +540,7 @@ function wrapper(plugin_info) {
     var guids = thisplugin.displayOrderGuids;
 
     var cache = thisplugin._displayOrderCache;
-    if (cache && cache.sorted === sorted && cache.guids === guids &&
-      cache.playerPosition === thisplugin.outboundPlayerPosition) {
+    if (cache && cache.sorted === sorted && cache.guids === guids) {
       return cache.result;
     }
 
@@ -562,7 +559,7 @@ function wrapper(plugin_info) {
     }
 
     var result = thisplugin.buildPhasedOutboundWalk(order);
-    thisplugin._displayOrderCache = { sorted: sorted, guids: guids, playerPosition: thisplugin.outboundPlayerPosition, result: result };
+    thisplugin._displayOrderCache = { sorted: sorted, guids: guids, result: result };
     return result;
   };
 
@@ -574,17 +571,27 @@ function wrapper(plugin_info) {
   // field that happens to involve the anchor as its 3rd point, no matter the order of anything
   // else; see thisplugin.countJetPairsClosedTogether's own comment.
   //
-  // Phase 1 (thisplugin.orderCaptureSweep): visit every OTHER portal, in the order that walks
-  // least from the player's own position, to capture/resonate it and (where this plan needs it) to
+  // Phase 1: visit every OTHER portal to capture/resonate it and (where this plan needs it)
   // collect its key — no linking at all yet.
   // Phase 2: the anchor itself, one stop. It already holds every other portal's key (all of Phase
   // 1 came first), so it can throw the whole of its own thisplugin.sortedFanpoints outgoing array
   // in one visit — exactly what buildFanPlan already built, untouched.
-  // Phase 3 (thisplugin.orderChainThrows): every portal that has its OWN outgoing "chain"/mesh
-  // link(s) to another non-anchor portal throws them now — ordered to maximize fields actually
-  // formed, and in particular to pair up as many jet-link double-closures as possible (every one
-  // of them now CAN pair, since Phase 2 already built both of the anchor's own relevant sides),
-  // distance a secondary concern only once fields/pairing are settled.
+  // Phase 3: every portal that has its OWN outgoing "chain"/mesh link(s) to another non-anchor
+  // portal throws them now.
+  //
+  // Both phases walk in the SAME order thisplugin.sortedFanpoints itself already is: the
+  // clockwise/counterclockwise sweep around the anchor buildFanPlan builds (bearing-sorted,
+  // rotated to start right after the widest angular gap — see its own comment), honoring
+  // thisplugin.is_clockwise, same as an ordinary CENTRALIZING fan field's own walk. This is
+  // deliberate, not merely the easiest option: it's the same order that already keeps a classic
+  // fan field's own walking distance low (no backtracking — each phase is a single sweep), AND,
+  // since Phase 2 has by then thrown every one of the anchor's own links, it's exactly the order
+  // that lets a Phase 3 chain link close together with whichever earlier chain link it shares a
+  // field with — the same mechanism that already makes an ordinary CENTRALIZING fan field's own
+  // mesh links pair up fields as it's walked. An independent per-phase search (nearest-neighbour/
+  // distance-and-field-scored local search) was tried first and discarded: it produced noticeably
+  // worse, backtracking-heavy walks in practice, precisely because it abandoned this already-
+  // proven sweep shape in favor of optimizing a narrower, geometry-blind metric.
   //
   // A portal that only ever RECEIVES the anchor's link (no outgoing chain link of its own) needs
   // only its Phase 1 visit. A portal that also throws its own chain link(s) needs a SECOND, later
@@ -607,14 +614,20 @@ function wrapper(plugin_info) {
   // Walk/display order only; thisplugin.sortedFanpoints (build order) is untouched, and an active
   // Route order already models all of this via its own precedences (thisplugin.getRouteStepStates
   // runs over whatever thisplugin.getDisplayOrder() — i.e. this function's own result — returns).
-  thisplugin.makeOutboundStopClone = function (fp, kind) {
-    return kind === 'capture'
-      ? { point: fp.point, portal: fp.portal, bearing: fp.bearing, guid: fp.guid,
-          incoming: fp.incoming, outgoing: [], outgoingMeta: {}, is_startpoint: fp.is_startpoint,
-          stopKey: fp.guid + '#1' }
-      : { point: fp.point, portal: fp.portal, bearing: fp.bearing, guid: fp.guid,
-          incoming: [], outgoing: fp.outgoing, outgoingMeta: fp.outgoingMeta, is_startpoint: fp.is_startpoint,
-          stopKey: fp.guid + '#2' };
+  // `outgoingSubset`: which of fp's own outgoing links this particular stop throws (see
+  // thisplugin.buildPhasedOutboundWalk — a capture stop throws fp's non-jet links, a throw stop
+  // throws only its jet link(s)).
+  thisplugin.makeOutboundStopClone = function (fp, kind, outgoingSubset) {
+    var outgoingMetaSubset = {};
+    outgoingSubset.forEach(function (target) { outgoingMetaSubset[target.guid] = fp.outgoingMeta[target.guid]; });
+    return {
+      point: fp.point, portal: fp.portal, bearing: fp.bearing, guid: fp.guid,
+      incoming: kind === 'capture' ? fp.incoming : [],
+      outgoing: outgoingSubset,
+      outgoingMeta: outgoingMetaSubset,
+      is_startpoint: fp.is_startpoint,
+      stopKey: fp.guid + (kind === 'capture' ? '#1' : '#2')
+    };
   };
 
   thisplugin.buildPhasedOutboundWalk = function (order) {
@@ -628,81 +641,206 @@ function wrapper(plugin_info) {
     var rest = order.slice(1);
     if (rest.length === 0) return order;
 
+    var naturalIndexByGuid = {};
+    rest.forEach(function (fp, i) { naturalIndexByGuid[fp.guid] = i; });
+
+    function isJetLink(fp, target) {
+      var meta = fp.outgoingMeta[target.guid];
+      return !!(meta && meta.creatingFieldsWith && meta.creatingFieldsWith.length === 2);
+    }
+
+    // A link must wait for Phase 3 if either:
+    //  - it's flagged as a jet link (thisplugin.getThirds2 found 2 "third" points for it — see
+    //    thisplugin.countJetPairsClosedTogether's own comment) — it needs the anchor's own 2
+    //    relevant throws (Phase 2) already in place to have any chance of pairing;
+    //  - its target isn't actually reachable yet at capture time in rest's own natural order —
+    //    either the anchor itself (an SBUL-capacity-exceeded mesh link throws INTO the anchor
+    //    instead of the anchor throwing out to it, see buildFanPlan's own localCenterKeys
+    //    comment — the anchor is never in `rest` at all, Phase 2 is its only stop), or, rarely,
+    //    another portal a manual/"Less walking" link flip moved out of its usual "always points
+    //    to something earlier" position.
+    // Every other link is ordinary: it completes its one field whenever its own last missing side
+    // gets thrown, whichever throw that ends up being — nothing is ever lost by throwing it
+    // early (see thisplugin.countJetPairsClosedTogether: the TOTAL field count never depends on
+    // order, only which link gets credited). So a portal with nothing that needs deferring throws
+    // everything at capture time, same as an ordinary CENTRALIZING fan field's own mesh links —
+    // only a portal with at least one link that actually needs it gets split into two stops, and
+    // only that link (or those links) specifically wait for Phase 3. This keeps the double-visit
+    // cost scoped to exactly where it buys something (a guaranteed paired closure, or a link that
+    // was never throwable at capture time to begin with), not spread across every portal that
+    // merely has a mesh link at all. By construction every deferred link's target — the anchor
+    // (Phase 2, always before Phase 3) or any other portal (its own capture, always in Phase 1,
+    // always before Phase 3 as a whole) — is guaranteed ready by the time Phase 3 starts,
+    // regardless of Phase 3's own internal order.
+    function needsPhase3(fp, target) {
+      if (isJetLink(fp, target)) return true;
+      var targetIdx = naturalIndexByGuid[target.guid];
+      return targetIdx === undefined || targetIdx >= naturalIndexByGuid[fp.guid];
+    }
+
     var phase1 = [];
-    var phase3Throwers = [];
+    var throwers = []; // { fp, deferredOutgoing }
     rest.forEach(function (fp) {
-      if ((fp.outgoing || []).length > 0) {
-        phase1.push(thisplugin.makeOutboundStopClone(fp, 'capture'));
-        phase3Throwers.push(thisplugin.makeOutboundStopClone(fp, 'throw'));
-      } else {
+      var outgoing = fp.outgoing || [];
+      var deferredOutgoing = outgoing.filter(function (target) { return needsPhase3(fp, target); });
+      if (deferredOutgoing.length === 0) {
         fp.stopKey = fp.guid;
         phase1.push(fp);
+        return;
       }
+      var immediateOutgoing = outgoing.filter(function (target) { return !needsPhase3(fp, target); });
+      phase1.push(thisplugin.makeOutboundStopClone(fp, 'capture', immediateOutgoing));
+      throwers.push({ fp: fp, deferredOutgoing: deferredOutgoing });
     });
 
-    var anchorLatLng = map.unproject(anchor.point, thisplugin.PROJECT_ZOOM);
-
-    thisplugin.ensureOutboundPositionTracking();
-    var orderedPhase1 = phase1;
-    if (thisplugin.outboundPlayerPosition) {
-      orderedPhase1 = thisplugin.orderCaptureSweep(phase1, thisplugin.outboundPlayerPosition.latlng, anchorLatLng);
-    }
-    // No cached position yet: ensureOutboundPositionTracking() above has a fetch under way and
-    // redraws once it resolves — leave Phase 1 in its natural ("Less walking") order meanwhile.
-
-    // Phase 3 needs no player position at all (it starts from the anchor's own point, not the
-    // player's), so it always runs, independent of Phase 1's own GPS availability.
-    var orderedPhase3 = phase3Throwers.length > 1
-      ? thisplugin.orderChainThrows(phase3Throwers, orderedPhase1.concat([anchor]), anchorLatLng)
-      : phase3Throwers;
-
-    // Whatever "Less walking" (computeDistanceOrderReordering) decided is superseded by the
-    // reorders just above for any portal either search actually placed — every one of those was
-    // just positioned by its own distance/field search, not by that earlier relocation. Dropping
-    // them from relocatedForLessWalkingGuids stops the Task List from flagging (green, "capture
-    // early") a portal based on a position it no longer actually has.
-    if (Object.keys(thisplugin.relocatedForLessWalkingGuids).length) {
-      orderedPhase1.forEach(function (fp) { delete thisplugin.relocatedForLessWalkingGuids[fp.guid]; });
-      orderedPhase3.forEach(function (fp) { delete thisplugin.relocatedForLessWalkingGuids[fp.guid]; });
-    }
-
-    return orderedPhase1.concat([anchor]).concat(orderedPhase3);
-  };
-
-  // RADIATING (OUTBOUND) mode: the player's position, cached for ordering Phase 1 (the capture
-  // sweep) above. Never fetched synchronously from there (geolocation is async) — refreshed
-  // periodically here instead while RADIATING is active, and used stale between refreshes rather
-  // than blocking the draw. { latlng, source }, same shape thisplugin.getPlayerPosition returns.
-  thisplugin.outboundPlayerPosition = null;
-  thisplugin.OUTBOUND_POSITION_REFRESH_MS = 60000;
-  thisplugin._outboundPositionTimer = null;
-  thisplugin._outboundPositionFetchInFlight = false;
-
-  thisplugin.refreshOutboundPlayerPosition = function () {
-    if (thisplugin._outboundPositionFetchInFlight) return;
-    thisplugin._outboundPositionFetchInFlight = true;
-    thisplugin.getPlayerPosition(function (position) {
-      thisplugin._outboundPositionFetchInFlight = false;
-      thisplugin.outboundPlayerPosition = position;
-      if (thisplugin.stardirection === thisplugin.starDirENUM.RADIATING) {
-        thisplugin.redrawWalkOrder();
-      }
+    // Phase 3's own order only matters for walking distance and for pairing quality (does a jet
+    // link's OTHER triangle, if it also depends on another deferred link, happen to be ready by
+    // the time this one throws) — never for precedence/safety, which the construction above
+    // already guarantees unconditionally. Gets its own fresh clockwise/counterclockwise sweep
+    // rather than inheriting rest's order filtered down to throwers — filtering can leave gaps a
+    // plain bearing sort never had to deal with (see thisplugin.sortAroundAnchorByBearing's own
+    // comment).
+    var sortedThrowerFps = thisplugin.sortAroundAnchorByBearing(
+      throwers.map(function (t) { return t.fp; }), anchor.point, thisplugin.is_clockwise);
+    var deferredByGuid = {};
+    throwers.forEach(function (t) { deferredByGuid[t.fp.guid] = t.deferredOutgoing; });
+    var phase3Seed = sortedThrowerFps.map(function (fp) {
+      return thisplugin.makeOutboundStopClone(fp, 'throw', deferredByGuid[fp.guid]);
     });
+
+    // A thrower whose own deferred link points AT the anchor (an SBUL-capacity-exceeded portal
+    // throwing INTO the anchor instead of the anchor throwing out to it — see buildFanPlan's own
+    // localCenterKeys comment) is itself the "anchor side" some OTHER jet link's own anchor
+    // triangle needs ready — not automatically true just because Phase 2 already happened, since
+    // in this reversed case it's THIS portal's own Phase 3 throw that completes that side, not the
+    // anchor's. Moving every such reversed-anchor throw to the very front of Phase 3 (stable, so
+    // their own relative bearing order is kept) means every OTHER jet link's anchor triangle is
+    // unconditionally ready by the time anything else in Phase 3 throws.
+    var reversedToAnchor = [];
+    var ordinary = [];
+    phase3Seed.forEach(function (stop) {
+      var throwsToAnchor = (stop.outgoing || []).some(function (target) { return target.guid === anchor.guid; });
+      (throwsToAnchor ? reversedToAnchor : ordinary).push(stop);
+    });
+    phase3Seed = reversedToAnchor.concat(ordinary);
+
+    // The construction above is usually enough, but a jet link's OTHER (non-anchor) triangle can
+    // itself depend on another deferred link — nothing about it guarantees that dependency is
+    // sequenced correctly, so it's refined against the actual pairing outcome next.
+    var phase3 = thisplugin.maximizeJetPairing(phase3Seed, phase1.concat([anchor]));
+
+    return phase1.concat([anchor]).concat(phase3);
   };
 
-  // Starts (or keeps alive) the periodic refresh above while RADIATING is active, and stops it
-  // the moment it isn't — this must never poll GPS for an inbound plan. Called from
-  // buildPhasedOutboundWalk (so it starts as soon as a RADIATING plan is first drawn)
-  // and from toggleStarDirection (so switching away stops it right away, not on the next draw).
-  thisplugin.ensureOutboundPositionTracking = function () {
-    if (thisplugin.stardirection !== thisplugin.starDirENUM.RADIATING) {
-      clearInterval(thisplugin._outboundPositionTimer);
-      thisplugin._outboundPositionTimer = null;
-      return;
+  // Refines throwerStops's own order (seeded from thisplugin.sortAroundAnchorByBearing, already a
+  // good baseline for both distance and, usually, pairing) to close as many jet-link double-fields
+  // together as the triangle graph allows: a jet link deferred to Phase 3 (see
+  // thisplugin.buildPhasedOutboundWalk) still needs whichever OTHER deferred link completes its
+  // non-anchor triangle to already be thrown — the anchor's own 2 sides are always ready by Phase
+  // 3 (Phase 2 precedes it), but that other side can itself be another Phase 3 stop, and nothing
+  // about the sweep order guarantees it lands first.
+  //
+  // Deliberately NOT a generic blind local search (an earlier version tried nearest-
+  // neighbour/distance-and-jetPairs-scored hill-climbing here — discarded: with dozens of
+  // throwers, each candidate costing a full thisplugin.simulateWalk re-run, the search routinely
+  // burned its whole time budget without ever reaching the specific swap a given plan needed,
+  // which is unacceptable given pairing is a hard, non-negotiable guarantee, not a best-effort
+  // optimization). Instead, diagnoses each still-unpaired jet link directly against ONE
+  // simulated walk per round: for every one of its 2 triangles' 4 "other" sides (both endpoints
+  // of both third points) that isn't built yet, that side's own thrower is somewhere later in
+  // `seq` — move THAT stop to right before the jet link's own stop, which is always safe
+  // (Phase 3 as a whole is already fully precedence-safe regardless of its own internal order,
+  // per thisplugin.buildPhasedOutboundWalk's own comment) and directly targets the actual cause,
+  // not a blind guess. One fix applied per round (moving one stop can change what's now blocking
+  // what else), then re-simulated from scratch; bounded by `seq.length` rounds as a safety net
+  // against two links trading places forever, though in practice each fix makes real progress.
+  thisplugin.OUTBOUND_PAIRING_REFINE_BUDGET_MS = 2000;
+
+  thisplugin.maximizeJetPairing = function (throwerStops, precedingWalk) {
+    var seq = throwerStops.slice();
+    if (seq.length <= 1) return seq;
+
+    var deadline = Date.now() + thisplugin.OUTBOUND_PAIRING_REFINE_BUDGET_MS;
+    var baseLen = precedingWalk.length;
+    var maxRounds = seq.length + 5;
+
+    for (var round = 0; round < maxRounds && Date.now() < deadline; round++) {
+      var fullWalk = precedingWalk.concat(seq);
+
+      var pointToGuid = {};
+      fullWalk.forEach(function (fp) { pointToGuid[thisplugin.pointKey(fp.point)] = fp.guid; });
+
+      // Every real link in the plan, by undirected endpoint pair, mapped to the global walk
+      // position of whichever of its two directions is the one actually thrown.
+      var thrownAtGlobalPos = {};
+      fullWalk.forEach(function (fp, gi) {
+        (fp.outgoing || []).forEach(function (target) {
+          thrownAtGlobalPos[thisplugin.getUndirectedLinkKey(fp.guid, target.guid)] = gi;
+        });
+      });
+
+      var fixedThisRound = false;
+      for (var i = 0; i < seq.length && !fixedThisRound; i++) {
+        var fp = seq[i];
+        var gi = baseLen + i;
+        var outs = fp.outgoing || [];
+        for (var oi = 0; oi < outs.length && !fixedThisRound; oi++) {
+          var target = outs[oi];
+          var meta = fp.outgoingMeta[target.guid];
+          if (!(meta && meta.creatingFieldsWith && meta.creatingFieldsWith.length === 2)) continue;
+
+          var thirdGuids = meta.creatingFieldsWith.map(function (p) { return pointToGuid[thisplugin.pointKey(p)]; });
+          for (var ti = 0; ti < thirdGuids.length && !fixedThisRound; ti++) {
+            var thirdGuid = thirdGuids[ti];
+            if (!thirdGuid) continue;
+            var sides = [[fp.guid, thirdGuid], [target.guid, thirdGuid]];
+            for (var si = 0; si < sides.length && !fixedThisRound; si++) {
+              var key = thisplugin.getUndirectedLinkKey(sides[si][0], sides[si][1]);
+              var pos = thrownAtGlobalPos[key];
+              if (pos === undefined || pos < gi) continue; // already built, or not this plan's own link at all
+
+              var blockerIdx = pos - baseLen;
+              if (blockerIdx <= i) continue; // defensive; shouldn't happen given pos >= gi = baseLen + i
+              var blocker = seq[blockerIdx];
+              seq.splice(blockerIdx, 1);
+              seq.splice(i, 0, blocker);
+              fixedThisRound = true;
+            }
+          }
+        }
+      }
+      if (!fixedThisRound) break;
     }
-    if (thisplugin._outboundPositionTimer) return;
-    thisplugin.refreshOutboundPlayerPosition();
-    thisplugin._outboundPositionTimer = setInterval(thisplugin.refreshOutboundPlayerPosition, thisplugin.OUTBOUND_POSITION_REFRESH_MS);
+
+    return seq;
+  };
+
+  // Re-sorts `fps` into a single clockwise/counterclockwise sweep around `anchorPoint` — the same
+  // construction thisplugin.sortedFanpoints itself is already built with (see buildFanPlan's own
+  // comment: bearing-sort, then rotate so the walk starts right after the widest angular gap
+  // between the portals themselves, so the sweep never "cuts across" its own middle). Used to give
+  // Phase 3 of the RADIATING walk (thisplugin.buildPhasedOutboundWalk) its own clean sweep over
+  // just its subset of portals, rather than inheriting gaps left by filtering a sweep computed for
+  // a larger set.
+  thisplugin.sortAroundAnchorByBearing = function (fps, anchorPoint, clockwise) {
+    if (fps.length <= 1) return fps.slice();
+
+    var withBearing = fps.map(function (fp) {
+      return { fp: fp, bearing: thisplugin.getBearing(anchorPoint, fp.point) };
+    });
+    withBearing.sort(function (a, b) { return a.bearing - b.bearing; });
+
+    var maxGap = 0, maxGapIndex = 0;
+    for (var i = 0; i < withBearing.length; i++) {
+      var prevBearing = (i === 0) ? withBearing[withBearing.length - 1].bearing : withBearing[i - 1].bearing;
+      var gap = withBearing[i].bearing - prevBearing;
+      if (gap < 0) gap += 360;
+      if (gap > maxGap) { maxGap = gap; maxGapIndex = i; }
+    }
+
+    var rotated = withBearing.slice(maxGapIndex).concat(withBearing.slice(0, maxGapIndex));
+    if (!clockwise) rotated.reverse();
+    return rotated.map(function (x) { return x.fp; });
   };
 
   // A jet link is one link whose throw closes TWO triangles at once, because the other 2 sides of
@@ -713,10 +851,9 @@ function wrapper(plugin_info) {
   // total field count either way (thisplugin.simulateWalk always credits each triangle to
   // whichever of its 3 sides is thrown last, wherever that ends up), so it's purely a question of
   // whether the order lines things up for the pairing. Counts, for one simulated walk, how many of
-  // the plan's own jet links actually land their double-closure in that walk — used by
-  // thisplugin.orderChainThrows (Phase 3 of the RADIATING walk, see thisplugin.buildPhasedOutboundWalk)
-  // to prefer an order that pairs them, since nothing else about `sim` (in particular
-  // sim.triangles.length, the TOTAL field count) can tell two such orders apart on its own.
+  // the plan's own jet links actually land their double-closure in that walk — kept as a
+  // diagnostic/verification helper (see the RADIATING tests) for exactly the structural guarantee
+  // thisplugin.buildPhasedOutboundWalk's own sweep order is relied on to provide.
   thisplugin.countJetPairsClosedTogether = function (sim, fullWalk) {
     var count = 0;
     fullWalk.forEach(function (fp) {
@@ -731,228 +868,6 @@ function wrapper(plugin_info) {
     return count;
   };
 
-  // Phase 1 of the RADIATING walk (see thisplugin.buildPhasedOutboundWalk): orders phase1Fps (one
-  // capture-only stop per non-anchor portal) to walk as little as possible from startLatLng (the
-  // player) through all of them and on to the anchor (anchorLatLng). Nothing is thrown in this
-  // phase, so there's no precedence or field concern at all — pure distance. Same nearest-neighbour
-  // + bounded local-search shape thisplugin.computeRouteOrder/orderChainThrows use, just scored on
-  // distance alone (so, unlike those, this never needs thisplugin.simulateWalk at all).
-  thisplugin.OUTBOUND_CAPTURE_SWEEP_BUDGET_MS = 300;
-
-  thisplugin.orderCaptureSweep = function (phase1Fps, startLatLng, anchorLatLng) {
-    var m = phase1Fps.length;
-    if (m <= 1) return phase1Fps;
-
-    var latLngs = phase1Fps.map(function (fp) { return map.unproject(fp.point, thisplugin.PROJECT_ZOOM); });
-    var allPoints = latLngs.concat([startLatLng, anchorLatLng]);
-    var START = m, END = m + 1;
-    var dist = allPoints.map(function (a) { return allPoints.map(function (b) { return a.distanceTo(b); }); });
-
-    function lengthOf(seq) {
-      var total = dist[START][seq[0]];
-      for (var i = 1; i < seq.length; i++) total += dist[seq[i - 1]][seq[i]];
-      total += dist[seq[seq.length - 1]][END];
-      return total;
-    }
-
-    // Nearest-neighbour from the player's position — no precedence constraints at all here.
-    var seq = [];
-    var placed = [];
-    var current = START;
-    while (seq.length < m) {
-      var choice = -1;
-      for (var i = 0; i < m; i++) {
-        if (placed[i]) continue;
-        if (choice === -1 || dist[current][i] < dist[current][choice]) choice = i;
-      }
-      seq.push(choice);
-      placed[choice] = true;
-      current = choice;
-    }
-
-    var deadline = Date.now() + thisplugin.OUTBOUND_CAPTURE_SWEEP_BUDGET_MS;
-    var best = seq, bestLen = lengthOf(seq);
-
-    // "Less walking" (computeDistanceOrderFlips/computeDistanceOrderReordering) may already have
-    // relocated some of these portals into a good order of its own before this ever runs —
-    // phase1Fps arrives in exactly that order. Tried here as a second starting candidate alongside
-    // the nearest-neighbour construction above, rather than only ever starting fresh and silently
-    // discarding that earlier work.
-    var identitySeq = [];
-    for (var identityIdx = 0; identityIdx < m; identityIdx++) identitySeq.push(identityIdx);
-    var identityLen = lengthOf(identitySeq);
-    if (identityLen < bestLen - 1e-6) { best = identitySeq; bestLen = identityLen; }
-
-    var maxPasses = 6;
-    for (var pass = 0; pass < maxPasses && Date.now() < deadline; pass++) {
-      var improved = false;
-      for (var len = 1; len <= 3 && !improved && Date.now() < deadline; len++) {
-        for (var a = 0; a + len <= m && !improved && Date.now() < deadline; a++) {
-          var run = best.slice(a, a + len);
-          var rest = best.slice(0, a).concat(best.slice(a + len));
-          for (var j = 0; j <= rest.length && !improved; j++) {
-            if (j === a) continue;
-            var candidate = rest.slice(0, j).concat(run, rest.slice(j));
-            var candLen = lengthOf(candidate);
-            if (candLen < bestLen - 1e-6) { best = candidate; bestLen = candLen; improved = true; }
-          }
-        }
-      }
-      for (var x = 0; x < m - 1 && !improved && Date.now() < deadline; x++) {
-        for (var y = x + 1; y < m && !improved; y++) {
-          var reversed = best.slice(0, x).concat(best.slice(x, y + 1).reverse(), best.slice(y + 1));
-          var revLen = lengthOf(reversed);
-          if (revLen < bestLen - 1e-6) { best = reversed; bestLen = revLen; improved = true; }
-        }
-      }
-      if (!improved) break;
-    }
-
-    return best.map(function (idx) { return phase1Fps[idx]; });
-  };
-
-  // Phase 3 of the RADIATING walk (see thisplugin.buildPhasedOutboundWalk): orders throwerFps (one
-  // throw stop per non-anchor portal that has its own outgoing chain/mesh link(s)) to maximize
-  // fields actually formed, and in particular jet-link double-closures, first — distance only a
-  // secondary tiebreak. By the time Phase 3 runs, precedingWalk (Phase 1 + the anchor) has already
-  // thrown every anchor-touching link there is, so a jet link's anchor-side triangle is always
-  // ready; whether its OTHER (non-anchor) triangle is also ready — letting this same throw close
-  // both at once — is exactly what this search is free to arrange, unlike the old anchor-last walk
-  // where it never could (see thisplugin.countJetPairsClosedTogether's own comment). Every
-  // candidate ordering is scored against the FULL walk it would produce (precedingWalk + this
-  // candidate sequence, exactly what thisplugin.simulateWalk expects), judged in this order:
-  //  1. precedence violations (a thrower linking to another one of this very segment before that
-  //     one has thrown ITS OWN chain link yet — see the comment below on why this should always be
-  //     zero by construction, checked anyway as a defensive net);
-  //  2. links the walk order makes impossible to throw from under a field;
-  //  3. fields actually formed;
-  //  4. jet links whose two fields actually close together, on the same throw;
-  //  5. total distance walked, starting from the anchor's own point.
-  // Nearest-neighbour + bounded local-search shape, same as Phase 1/thisplugin.computeRouteOrder.
-  thisplugin.OUTBOUND_CHAIN_THROW_BUDGET_MS = 300;
-
-  thisplugin.orderChainThrows = function (throwerFps, precedingWalk, anchorLatLng) {
-    var m = throwerFps.length;
-    if (m <= 1) return throwerFps;
-
-    var indexByGuid = {};
-    throwerFps.forEach(function (fp, i) { indexByGuid[fp.guid] = i; });
-
-    // Pairs [target index, source index]: the target must throw ITS OWN chain link before the
-    // source does, if the source's own chain link points at a fellow Phase-3 thrower. By
-    // construction this should never actually happen — every thrower's own outgoing targets are
-    // chain/mesh links to portals that already got their key in Phase 1, not a dependency on
-    // another thrower's own (Phase-3-only) link — but checked anyway, same defensive idiom as
-    // thisplugin.computeRouteOrder's own precedences.
-    var precedences = [];
-    throwerFps.forEach(function (fp, i) {
-      (fp.outgoing || []).forEach(function (target) {
-        var j = indexByGuid[target.guid];
-        if (j === undefined) return;
-        if (thisplugin.isLinkInGame(fp.guid, target.guid)) return;
-        precedences.push([j, i]);
-      });
-    });
-
-    var latLngs = throwerFps.map(function (fp) { return map.unproject(fp.point, thisplugin.PROJECT_ZOOM); });
-    var allPoints = latLngs.concat([anchorLatLng]);
-    var START = m;
-    var dist = allPoints.map(function (a) { return allPoints.map(function (b) { return a.distanceTo(b); }); });
-
-    function lengthOf(seq) {
-      var total = dist[START][seq[0]];
-      for (var i = 1; i < seq.length; i++) total += dist[seq[i - 1]][seq[i]];
-      return total;
-    }
-    function violationsOf(seq) {
-      var pos = [];
-      seq.forEach(function (idx, p) { pos[idx] = p; });
-      return precedences.filter(function (pair) { return pos[pair[0]] > pos[pair[1]]; }).length;
-    }
-    function evaluate(seq) {
-      var fullWalk = precedingWalk.concat(seq.map(function (idx) { return throwerFps[idx]; }));
-      var sim = thisplugin.simulateWalk(fullWalk);
-      return {
-        seq: seq,
-        length: lengthOf(seq),
-        violations: violationsOf(seq),
-        invalid: Object.keys(sim.invalid).length,
-        fields: sim.triangles.length,
-        jetPairs: thisplugin.countJetPairsClosedTogether(sim, fullWalk)
-      };
-    }
-    function isBetter(a, b) {
-      if (a.violations !== b.violations) return a.violations < b.violations;
-      if (a.invalid !== b.invalid) return a.invalid < b.invalid;
-      if (a.fields !== b.fields) return a.fields > b.fields;
-      if (a.jetPairs !== b.jetPairs) return a.jetPairs > b.jetPairs;
-      return a.length < b.length - 1e-6;
-    }
-
-    // Nearest-neighbour from the anchor's own position, skipping anything still blocked by a
-    // not-yet-placed prerequisite of this segment.
-    var seq = [];
-    var placed = [];
-    var current = START;
-    while (seq.length < m) {
-      var choice = -1;
-      for (var i = 0; i < m; i++) {
-        if (placed[i]) continue;
-        var blocked = precedences.some(function (pair) { return pair[1] === i && !placed[pair[0]]; });
-        if (blocked) continue;
-        if (choice === -1 || dist[current][i] < dist[current][choice]) choice = i;
-      }
-      if (choice === -1) {
-        // A cycle among the precedences (shouldn't normally happen) — fall back to any
-        // unplaced portal rather than stall forever.
-        for (choice = 0; placed[choice]; choice++);
-      }
-      seq.push(choice);
-      placed[choice] = true;
-      current = choice;
-    }
-
-    var deadline = Date.now() + thisplugin.OUTBOUND_CHAIN_THROW_BUDGET_MS;
-    var best = evaluate(seq);
-
-    // Same "also try the order these throwers already arrived in" second seed as Phase 1 — never
-    // makes the result worse: best only changes when this candidate actually evaluates better.
-    var identitySeq = [];
-    for (var identityIdx = 0; identityIdx < m; identityIdx++) identitySeq.push(identityIdx);
-    var identityCandidate = evaluate(identitySeq);
-    if (isBetter(identityCandidate, best)) best = identityCandidate;
-
-    var maxPasses = 6;
-    for (var pass = 0; pass < maxPasses && Date.now() < deadline; pass++) {
-      var improved = false;
-      for (var len = 1; len <= 3 && !improved && Date.now() < deadline; len++) {
-        for (var a = 0; a + len <= m && !improved && Date.now() < deadline; a++) {
-          var run = best.seq.slice(a, a + len);
-          var rest = best.seq.slice(0, a).concat(best.seq.slice(a + len));
-          for (var j = 0; j <= rest.length && !improved; j++) {
-            if (j === a) continue;
-            var candidate = evaluate(rest.slice(0, j).concat(run, rest.slice(j)));
-            if (isBetter(candidate, best)) {
-              best = candidate;
-              improved = true;
-            }
-          }
-        }
-      }
-      for (var x = 0; x < m - 1 && !improved && Date.now() < deadline; x++) {
-        for (var y = x + 1; y < m && !improved; y++) {
-          var reversed = evaluate(best.seq.slice(0, x).concat(best.seq.slice(x, y + 1).reverse(), best.seq.slice(y + 1)));
-          if (isBetter(reversed, best)) {
-            best = reversed;
-            improved = true;
-          }
-        }
-      }
-      if (!improved) break;
-    }
-
-    return best.seq.map(function (idx) { return throwerFps[idx]; });
-  };
 
   // Identifies the plan's shape: its portals in build order, each with the portals it throws to.
   // Two plans with the same key have exactly the same links in the same directions.
@@ -4746,7 +4661,6 @@ function wrapper(plugin_info) {
 
   thisplugin.toggleStarDirection = function () {
     thisplugin.stardirection *= -1;
-    thisplugin.ensureOutboundPositionTracking(); // stops GPS polling right away when leaving RADIATING
     thisplugin.delayedUpdateLayer(0.2, true);
   };
 
