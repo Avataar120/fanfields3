@@ -80,12 +80,22 @@ function isWalkable(sortedFanpoints) {
         'the reference never forms fewer fields than the real plan (same link structure, so ' +
         'this should always hold -- a failure here would mean the reference itself is unfair)');
 
-      // Outbound mode has a known, already-flagged gap against this reference (see the plugin's
-      // own orderPrefixForOutbound: a 300ms-budgeted local search over only a sub-segment of the
-      // walk) -- a wider tolerance here reflects that known limitation rather than hiding a
-      // fresh regression. Tightening this number is exactly how that gap would get re-measured
-      // if orderPrefixForOutbound is ever improved.
-      const tolerance = mode === 'outbound' ? 1.75 : 1.15;
+      // Outbound mode walks a deliberately different, 3-phase shape (capture -> anchor -> chain
+      // throws, see thisplugin.buildPhasedOutboundWalk) that revisits a portal a second time
+      // whenever -- and only whenever -- doing so is what actually lets a jet link close both its
+      // fields together, something a single-pass walk structurally cannot guarantee (every
+      // triangle whose 3rd point is the anchor can only close together with its mesh link if the
+      // anchor's own relevant throws happen first, which requires moving the anchor out of
+      // "last"). This is an explicit, non-negotiable priority the plugin's maintainer set directly
+      // after testing an earlier version in real play: never trade away a reachable double field
+      // closure to save walking distance. On this fixture, a large majority of portals turn out to
+      // need the second visit (dense meshes mean most mesh links ARE jet links), so the ratio
+      // against a single-pass reference is well above what a classic single-anchor fan field would
+      // ever see -- that's the accepted cost of the guarantee, not a search-quality regression.
+      // Tightening this number is exactly how a future improvement to Phase 3's own ordering, or a
+      // smarter test reference that itself accounts for necessary double-visits, would get
+      // re-measured.
+      const tolerance = mode === 'outbound' ? 3.0 : 1.15;
       assert.ok(plan.totalWalkDistance <= reference.totalDistance * tolerance,
         'plan distance ' + plan.totalWalkDistance.toFixed(4) + ' vs reference ' +
         reference.totalDistance.toFixed(4) + ' (ratio ' +

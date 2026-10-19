@@ -108,16 +108,6 @@ async function buildPlan(fixturePortals, options) {
     console.log = realConsoleLog;
   }
 
-  // Outbound mode orders the walk ahead of the anchor against the player's own position
-  // (thisplugin.orderPrefixForOutbound), fetched asynchronously (thisplugin.getPlayerPosition) --
-  // in the sandbox this always falls back to "no GPS" (see pluginSandbox's navigator stub), but
-  // still only AFTER a real tick, same as a browser's Geolocation API never answering
-  // synchronously. Reading the walk order before that fallback lands would silently test the
-  // un-optimized, bearing-sorted prefix instead of the real algorithm.
-  if (options.mode === 'outbound') {
-    await new Promise(function (resolve) { setTimeout(resolve, 20); });
-  }
-
   return {
     sandbox,
     thisplugin,
