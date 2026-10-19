@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         7.0.0.20261016
+// @version         7.0.1.20261019
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,19 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-16-120000';
+  plugin_info.dateTimeVersion = '2026-10-19-120000';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '7.0.1',
+      changes: [
+        'FIX: Outbound Fan Field plans sometimes only closed one of a pair of fields that should have closed together, because the anchor was walked last instead of before the links that depend on it. The walk order now visits the anchor earlier and is guaranteed to close every double field it plans, while still following the usual fan field capture route instead of backtracking.',
+        'FIX: Outbound Herringbone plans could predict a field closing on a link that, given the real throw order, could never actually complete it, so the Task List didn\'t match what happened in game.',
+      ],
+    },{
       version: '7.0.0',
       changes: [
         'NEW: Added Herringbone mode, an alternative to Fan field: a 2-anchor plan where every portal links to both anchors, with the best anchor pair found automatically. Switch between Fan field and Herringbone from a new icon on the map, in the spot the old Shift left button used to occupy.',
