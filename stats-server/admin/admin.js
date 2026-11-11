@@ -432,6 +432,119 @@
     return svg;
   }
 
+  // Angle de départ/fin en radians (0 en haut, sens horaire) -> chemin SVG d'une tranche de
+  // camembert. Un camembert à une seule tranche (100%) ne peut pas s'exprimer avec un seul arc
+  // (point de départ = point d'arrivée), d'où le cercle plein en cas particulier.
+  function pieSlicePath(cx, cy, r, start, end) {
+    if (end - start >= Math.PI * 2 - 1e-6) {
+      return 'M' + (cx - r) + ',' + cy +
+        ' A' + r + ',' + r + ' 0 1,1 ' + (cx + r) + ',' + cy +
+        ' A' + r + ',' + r + ' 0 1,1 ' + (cx - r) + ',' + cy + ' Z';
+    }
+    const x0 = cx + r * Math.sin(start), y0 = cy - r * Math.cos(start);
+    const x1 = cx + r * Math.sin(end), y1 = cy - r * Math.cos(end);
+    const largeArc = (end - start) > Math.PI ? 1 : 0;
+    return 'M' + cx + ',' + cy + ' L' + x0 + ',' + y0 +
+      ' A' + r + ',' + r + ' 0 ' + largeArc + ' 1 ' + x1 + ',' + y1 + ' Z';
+  }
+
+  // Angle d'or : deux tranches voisines n'ont jamais une teinte proche, quel que soit le nombre
+  // de tranches (pas besoin de connaître le total à l'avance, contrairement à une palette fixe).
+  function pieColor(i) { return 'hsl(' + ((i * 137.508) % 360) + ', 60%, 55%)'; }
+
+  // Dessine un camembert dans `container` à partir de `rows` ([{label, count, color?}]) : une
+  // tranche par ligne non vide, couleur explicite ou sinon tirée de l'angle d'or (deux tranches
+  // voisines n'ont alors jamais une teinte proche, quel que soit le nombre de tranches).
+  function renderPieInto(container, rows) {
+    container.textContent = '';
+    rows = rows.filter(function (r) { return r.count > 0; });
+    const total = rows.reduce(function (s, r) { return s + r.count; }, 0);
+    if (!total) { container.appendChild(el('p', 'muted', 'No data for this range.')); return; }
+
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', '0 0 42 42');
+    svg.setAttribute('class', 'pie-chart');
+    const legend = el('div', 'pie-legend');
+
+    let angle = 0;
+    rows.forEach(function (r, i) {
+      const frac = r.count / total;
+      const start = angle;
+      angle += frac * Math.PI * 2;
+      const color = r.color || pieColor(i);
+      const pct = Math.round(frac * 100);
+
+      const path = document.createElementNS(svgNs, 'path');
+      path.setAttribute('d', pieSlicePath(21, 21, 20, start, angle));
+      path.setAttribute('fill', color);
+      const titleEl = document.createElementNS(svgNs, 'title');
+      titleEl.textContent = r.label + ' : ' + pct + '% (' + r.count + ' agent(s))';
+      path.appendChild(titleEl);
+      svg.appendChild(path);
+
+      const item = el('span', 'pie-legend-item');
+      const swatch = el('span', 'pie-legend-swatch');
+      swatch.style.background = color;
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(r.label + ' ' + pct + '% (' + r.count + ')'));
+      legend.appendChild(item);
+    });
+
+    container.appendChild(svg);
+    container.appendChild(legend);
+  }
+
+  // Camembert répartissant TOUS les agents de la plage (dates/faction/région, indépendamment des
+  // puces de filtre) selon leur version de plugin : "quelle part des joueurs du serveur est sur
+  // la dernière version, laquelle traîne sur une version plus vieille".
+  function renderVersionPie(list) {
+    const counts = {};
+    list.forEach(function (a) {
+      const v = a.version || '';
+      counts[v] = (counts[v] || 0) + 1;
+    });
+    const versions = Object.keys(counts).filter(Boolean).sort(compareVersions).reverse();
+    if (counts['']) versions.push('');
+    renderPieInto($('versionPie'), versions.map(function (v) { return { label: v || 'Unknown', count: counts[v] }; }));
+  }
+
+  const PIE_YES_COLOR = 'hsl(261, 55%, 55%)';
+  const PIE_NO_COLOR = 'hsl(220, 10%, 60%)';
+  const PIE_UNKNOWN_COLOR = 'hsl(220, 10%, 85%)';
+
+  // Un agent dont `detailedSeconds` est nul n'a jamais envoyé de ping v2 (7.1.0+) : on ne sait
+  // tout simplement rien de ses options/fonctionnalités, distinct de "connu et jamais utilisé".
+  function chipAdoptionRows(c) {
+    let yes = 0, no = 0, unknown = 0;
+    agentsData.forEach(function (a) {
+      if (c.test(a)) yes++;
+      else if (a.detailedSeconds > 0) no++;
+      else unknown++;
+    });
+    return [
+      { label: 'Yes', count: yes, color: PIE_YES_COLOR },
+      { label: 'No', count: no, color: PIE_NO_COLOR },
+      { label: 'Unknown (before 7.1.0)', count: unknown, color: PIE_UNKNOWN_COLOR }
+    ];
+  }
+
+  // Un petit camembert par puce actuellement active : la répartition de TOUS les agents de la
+  // plage pour cet item précis (pas seulement ceux qui le matchent déjà, sinon ce serait 100%
+  // par construction).
+  function renderChipPies() {
+    const box = $('chipPies');
+    box.textContent = '';
+    CHIPS.filter(function (c) { return activeChips.has(c.id); }).forEach(function (c) {
+      const card = el('div', 'pie-card pie-card-sub');
+      card.appendChild(el('h3', null, c.label));
+      const wrap = el('div', 'pie-wrap');
+      card.appendChild(wrap);
+      renderPieInto(wrap, chipAdoptionRows(c));
+      box.appendChild(card);
+    });
+  }
+
   function splitBar(parts, total) {
     const wrap = el('div', 'split');
     if (!total) { wrap.appendChild(el('span', 'muted', '—')); return wrap; }
@@ -473,13 +586,16 @@
     return Math.round(mins / 1440) + ' d ago';
   }
 
+  // Même puces que filteredAgents(), mais sans le filtre de version : la population dont le
+  // camembert des versions (renderVersionPie) montre la répartition.
+  function chipFilteredAgents() {
+    const chips = CHIPS.filter(function (c) { return activeChips.has(c.id); });
+    return agentsData.filter(function (a) { return chips.every(function (c) { return c.test(a); }); });
+  }
+
   function filteredAgents() {
     const version = $('agentsVersion').value;
-    const chips = CHIPS.filter(function (c) { return activeChips.has(c.id); });
-    return agentsData.filter(function (a) {
-      if (version !== 'all' && a.version !== version) return false;
-      return chips.every(function (c) { return c.test(a); });
-    });
+    return chipFilteredAgents().filter(function (a) { return version === 'all' || a.version === version; });
   }
 
   function sortedAgents(list) {
@@ -702,6 +818,8 @@
     renderHead();
     const filtered = filteredAgents();
     renderAdoption(filtered);
+    renderVersionPie(agentsData);
+    renderChipPies();
     const body = $('agentsBody');
     body.textContent = '';
     const list = visibleAgents();
