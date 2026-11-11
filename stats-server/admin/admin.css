@@ -398,6 +398,7 @@ table.agents td.num { font-variant-numeric: tabular-nums; text-align: right; }
 .agent-row:hover, .agent-row.expanded { background: var(--surface-2); }
 .who { display: flex; align-items: center; gap: 8px; }
 .who code { font-size: 12px; }
+.who-alias { font-size: 13px; font-weight: 600; }
 .identicon {
   width: 22px;
   height: 22px;
@@ -437,6 +438,8 @@ tr.agent-detail > td { background: var(--surface-2); white-space: normal; paddin
 .detail { position: sticky; left: 12px; max-width: min(1160px, calc(100vw - 80px)); }
 .detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-size: 12px; }
 .detail-hash { font-size: 11px; word-break: break-all; }
+.alias-form { display: flex; align-items: center; gap: 6px; }
+.alias-input { font-size: 12px; padding: 4px 6px; width: 160px; }
 .detail-chart {
   display: flex;
   align-items: flex-end;

@@ -17,6 +17,26 @@
 
   let token = null;
 
+  // Alias locaux (hash -> nom affiché) : une pure commodité pour CET admin, jamais envoyée au
+  // serveur ni à personne d'autre -- le serveur ne connaît toujours que le hash, l'anonymat des
+  // pings n'est pas affecté. Permet de reconnaître d'un coup d'œil ses propres agents (ou ceux
+  // d'amis qui ont bien voulu partager leur pseudo) sans que le serveur ait jamais à le savoir.
+  const ALIAS_KEY = 'fanfields-stats-agent-aliases';
+
+  function getAliases() {
+    try {
+      const raw = localStorage.getItem(ALIAS_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return obj && typeof obj === 'object' ? obj : {};
+    } catch (e) { return {}; }
+  }
+  function getAlias(hash) { return getAliases()[hash] || ''; }
+  function setAlias(hash, label) {
+    const aliases = getAliases();
+    if (label) aliases[hash] = label; else delete aliases[hash];
+    try { localStorage.setItem(ALIAS_KEY, JSON.stringify(aliases)); } catch (e) { /* stockage indisponible */ }
+  }
+
   // localStorage (pas sessionStorage) : la session doit survivre à la fermeture du navigateur,
   // pour coller à la durée de 30 jours accordée côté serveur (voir SESSION_TTL).
   function getToken() {
@@ -541,7 +561,14 @@
     cells.push(el('td', 'num', String(rank)));
     const who = el('td', 'who');
     who.appendChild(identicon(a.agent));
-    who.appendChild(el('code', null, shortHash(a.agent)));
+    const alias = getAlias(a.agent);
+    if (alias) {
+      const name = el('span', 'who-alias', alias);
+      name.title = a.agent;
+      who.appendChild(name);
+    } else {
+      who.appendChild(el('code', null, shortHash(a.agent)));
+    }
     cells.push(who);
     cells.push(el('td', 'fac ' + (a.faction === 'ENL' ? 'enl' : 'res'), a.faction));
     cells.push(el('td', null, REGION_LABELS[a.region] || a.region));
@@ -592,6 +619,28 @@
       navigator.clipboard.writeText(a.agent).then(function () { toast('Hash copied'); }, function () { toast('Could not copy'); });
     });
     head.appendChild(copy);
+
+    // Local-only alias: a note for yourself, kept in this browser's storage alone -- the
+    // server, and whoever this plugin belongs to besides you, never sees it.
+    const aliasForm = el('form', 'alias-form');
+    const aliasInput = document.createElement('input');
+    aliasInput.type = 'text';
+    aliasInput.maxLength = 40;
+    aliasInput.placeholder = 'Alias (just for you)';
+    aliasInput.value = getAlias(a.agent);
+    aliasInput.className = 'alias-input';
+    aliasForm.appendChild(aliasInput);
+    const aliasSave = el('button', 'ghost small', 'Save');
+    aliasSave.type = 'submit';
+    aliasForm.appendChild(aliasSave);
+    aliasForm.addEventListener('click', function (ev) { ev.stopPropagation(); });
+    aliasForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      setAlias(a.agent, aliasInput.value.trim());
+      renderAgents();
+    });
+    head.appendChild(aliasForm);
+
     head.appendChild(el('span', 'muted', 'First seen ' + new Date(a.firstTs).toLocaleDateString() +
       ' · ' + a.pings + ' pings · ' + formatHours(a.seconds) + ' over ' + a.daysActive + ' day(s)'));
     box.appendChild(head);
