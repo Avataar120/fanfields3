@@ -986,6 +986,7 @@ function wrapper(plugin_info) {
   // portal as the anchor (see the portalSelected hook in setup()).
   thisplugin.toggleAnchorPicking = function () {
     thisplugin.isPickingAnchor = !thisplugin.isPickingAnchor;
+    if (thisplugin.isPickingAnchor) thisplugin.countUsage('anchor');
     thisplugin.updateAnchorPickingButton();
   };
 
@@ -1033,6 +1034,7 @@ function wrapper(plugin_info) {
   // called while picking is armed, never recalculates the plan itself (see
   // thisplugin.togglePortalExclusionMode for that).
   thisplugin.toggleExcludedPortal = function (guid) {
+    thisplugin.countUsage('exclude');
     var now = Date.now();
     var last = thisplugin._lastExcludeToggleAt[guid];
     if (last !== undefined && (now - last) < thisplugin.EXCLUDE_TOGGLE_DEBOUNCE_MS) return;
@@ -1609,6 +1611,7 @@ function wrapper(plugin_info) {
       .off('click.plugin_fanfields3_activity')
       .on('click.plugin_fanfields3_activity', '#plugin_fanfields3_activity_refresh', function (ev) {
         ev.preventDefault();
+        thisplugin.countUsage('activityRefresh');
         thisplugin.refreshMyActivityToday();
       });
   };
@@ -1630,6 +1633,7 @@ function wrapper(plugin_info) {
   };
 
   thisplugin.showStatistics = function () {
+    thisplugin.countUsage('stats');
     var width = 400;
     thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
     if (thisplugin.MaxDialogWidth < width) {
@@ -1753,6 +1757,7 @@ function wrapper(plugin_info) {
   };
 
   thisplugin.routeWithPortalRoute = function () {
+    thisplugin.countUsage('portalRoute');
     var routePlugin = thisplugin.getPortalRoutePlugin();
 
     if (!routePlugin) {
@@ -2529,6 +2534,7 @@ function wrapper(plugin_info) {
 
   // Show as list
   thisplugin.exportText = function () {
+    thisplugin.countUsage('taskList');
     thisplugin.exportDialogWidth = 500;
 
     var width = thisplugin.exportDialogWidth;
@@ -2665,6 +2671,7 @@ function wrapper(plugin_info) {
     $buttonpane.find('#plugin_fanfields3_tasklist_refresh')
       .off('click')
       .on('click', function () {
+        thisplugin.countUsage('taskRefresh');
         thisplugin.forceMapDataRefresh();
       });
     $buttonpane.find('#plugin_fanfields3_tasklist_reroute')
@@ -2811,6 +2818,7 @@ function wrapper(plugin_info) {
   // polyline grows stop by stop, with a marker at its leading edge, panning the map to keep
   // each stop in view as it's approached.
   thisplugin.startWalkSim = function () {
+    thisplugin.countUsage('walkSim');
     thisplugin.stopWalkSim();
 
     var stops = thisplugin.getWalkSimStops();
@@ -3166,6 +3174,7 @@ function wrapper(plugin_info) {
   // the new order everywhere the walk order is used, without recalculating the plan itself — so
   // it works the same whether the plan is Locked or not. Calls onDone once finished.
   thisplugin.rerouteFromPlayerPosition = function (onDone) {
+    thisplugin.countUsage('reroute');
     thisplugin.getPlayerPosition(function (position) {
       thisplugin.clearRouteOrder();
       thisplugin.validateUnderFieldLinks();
@@ -3194,6 +3203,7 @@ function wrapper(plugin_info) {
   // directly from the hamburger menu's "Plan details" submenu without the Task List ever being
   // open) and opens it in a new window for printing, with every link detail row expanded.
   thisplugin.exportTaskListToPDF = function () {
+    thisplugin.countUsage('printRoute');
     var $dlg = $('<div></div>').html(thisplugin.buildTaskListHTML());
 
     $dlg.find('[plugin_fanfields3_exportText_toggle="toggle"]')
@@ -3779,6 +3789,7 @@ function wrapper(plugin_info) {
   // same drawing, the same way DrawTools' own "Reset" does — best-effort, since this plugin's
   // own op storage is already the source of truth either way.
   thisplugin.loadOp = function (op) {
+    thisplugin.countUsage('opLoad');
     var dt = window.plugin.drawTools;
     dt.drawnItems.clearLayers();
     (op.data || []).forEach(function (item) {
@@ -4020,6 +4031,7 @@ function wrapper(plugin_info) {
         return;
       }
 
+      thisplugin.countUsage('opSave');
       thisplugin.refreshManageOpsDialog();
     }
 
@@ -4105,6 +4117,7 @@ function wrapper(plugin_info) {
       thisplugin.confirmDialog('Fan Fields 3 - Manage Ops',
         'Overwrite "' + window.escapeHtmlSpecialChars(op.name) + '" with the current drawing? This cannot be undone.',
         function () {
+          thisplugin.countUsage('opSave');
           thisplugin.updateOp(opId);
           thisplugin.refreshManageOpsDialog();
         });
@@ -4133,6 +4146,7 @@ function wrapper(plugin_info) {
       });
       return;
     }
+    thisplugin.countUsage('ops');
 
     var width = 480;
     thisplugin.MaxDialogWidth = thisplugin.getMaxDialogWidth();
@@ -6712,6 +6726,7 @@ function wrapper(plugin_info) {
     $('#dialog-plugin_fanfields3_keysvideo').dialog('option', 'buttons', {
       Cancel: function () { $(this).dialog('close'); },
       'Apply to Keys plugin': function () {
+        thisplugin.countUsage('keysVideo');
         $result.find('tbody tr').each(function () {
           if (!$(this).find('.plugin_fanfields3_keysvideo_apply').prop('checked')) return;
           var guid = $(this).attr('data-guid');
@@ -9580,6 +9595,7 @@ function wrapper(plugin_info) {
   // print it to PDF if wanted. Desktop keeps the print-dialog route, which is a real browser
   // feature there.
   thisplugin.exportPlanPdf = function () {
+    thisplugin.countUsage('printPlan');
     var order = thisplugin.getDisplayOrder();
     if (!order || order.length < 2) {
       alert('Fan Fields 3: no plan to export yet -- draw a polygon around some portals first.');
@@ -10098,10 +10114,12 @@ function wrapper(plugin_info) {
   //
   // Anonymous usage ping, sent to a small server this plugin's author runs: a one-way hash of
   // the agent's nickname (never the nickname itself — see computeStatsAgentHash below), the
-  // faction, and how many seconds the plugin was active. The server derives a coarse region
-  // from the request's IP itself (never sent by this code) and never sees anything else. Used
-  // only to gauge how the plugin is actually used (which faction, which region, how much) —
-  // there is no per-feature tracking of what you click or plan.
+  // faction, and anonymous usage details (see statsUsageDetails): desktop or mobile, plugin
+  // version, fan or herringbone, a coarse plan size bucket, which options are on, and how many
+  // times each tracked feature was used since the previous ping. The server derives a coarse
+  // region from the request's IP itself (never sent by this code). Nothing about the plan's
+  // content (portals, positions, op names) is ever sent. Used only to gauge how the plugin is
+  // actually used.
   //
   // In the field, IITC is often only open for a few seconds at a time (check the next step,
   // close it again), so there's no accumulating active time client-side on a timer: a ping this
@@ -10110,7 +10128,7 @@ function wrapper(plugin_info) {
   // STATS_PING_INTERVAL_MS below and SESSION_GAP_MS server-side) — a gap short enough to be the
   // same look at the map counts as active time, a long gap (plugin actually closed) doesn't.
   const STATS_ENDPOINT = 'https://fanfields.avataar120.com/collect';
-  const STATS_PROTOCOL_VERSION = 1;
+  const STATS_PROTOCOL_VERSION = 2;
   // While visible, re-ping often enough that consecutive pings always fall well under the
   // server's same-session cutoff — this is what lets a long, continuously open session still
   // accumulate active time, instead of only the instant open/close pings below.
@@ -10125,6 +10143,41 @@ function wrapper(plugin_info) {
 
   thisplugin._statsAgentHash = null;
   thisplugin._statsPingTimer = null;
+  // Feature use counts since the last ping sent (see thisplugin.countUsage); reset by each ping.
+  thisplugin._statsUsed = {};
+
+  // Records one use of a tracked feature, reported (then reset) with the next usage ping. Names
+  // must be in the stats server's USAGE_COUNTERS list, anything else is ignored there.
+  thisplugin.countUsage = function (name) {
+    thisplugin._statsUsed[name] = (thisplugin._statsUsed[name] || 0) + 1;
+  };
+
+  thisplugin.statsPlanSizeBucket = function (portalCount) {
+    if (portalCount <= 0) return '0';
+    if (portalCount <= 10) return '1-10';
+    if (portalCount <= 25) return '11-25';
+    if (portalCount <= 50) return '26-50';
+    return '50+';
+  };
+
+  // The plugin's state at ping time (the server credits the time since the previous ping to
+  // it), plus the feature use counts since that previous ping.
+  thisplugin.statsUsageDetails = function () {
+    var flags = [];
+    if (thisplugin.isTaskListDialogOpen()) flags.push('taskList');
+    if (thisplugin.consumeKeysOnLinkThrown) flags.push('spendKeys');
+    if (window.plugin && window.plugin.simpleCloudSync) flags.push('sync');
+    if (thisplugin.manageBlockers) flags.push('blockers');
+    if (thisplugin.use_bookmarks_only) flags.push('bookmarksOnly');
+    return {
+      platform: (L && L.Browser && L.Browser.mobile) ? 'mobile' : 'desktop',
+      version: changelog[0].version,
+      mode: thisplugin.fieldMode === thisplugin.fieldModeENUM.HERRINGBONE ? 'herringbone' : 'fan',
+      plan: thisplugin.statsPlanSizeBucket(thisplugin.sortedFanpoints.length),
+      flags: flags,
+      used: thisplugin._statsUsed
+    };
+  };
 
   function computeStatsAgentHash(nickname) {
     const enc = new TextEncoder();
@@ -10146,11 +10199,12 @@ function wrapper(plugin_info) {
   thisplugin._statsPing = function () {
     if (!thisplugin._statsAgentHash) return;
     try {
-      const payload = JSON.stringify({
+      const payload = JSON.stringify(Object.assign({
         v: STATS_PROTOCOL_VERSION,
         agent: thisplugin._statsAgentHash,
         faction: (window.PLAYER && window.PLAYER.team === 'ENLIGHTENED') ? 'ENL' : 'RES'
-      });
+      }, thisplugin.statsUsageDetails()));
+      thisplugin._statsUsed = {};
       if (navigator.sendBeacon) {
         navigator.sendBeacon(STATS_ENDPOINT, new Blob([payload], { type: 'text/plain' }));
       } else {
