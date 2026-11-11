@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         7.1.0.20261111
+// @version         7.1.1.20261111
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,18 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-11-11-155745';
+  plugin_info.dateTimeVersion = '2026-11-11-162304';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '7.1.1',
+      changes: [
+        'NEW: After about 2 hours, then again after 5 hours of active use, a one-time popup suggests starring the plugin on GitHub if you\'ve found it useful.',
+      ],
+    },{
       version: '7.1.0',
       changes: [
         'IMPROVE: The anonymous usage data the plugin sends now also covers desktop or mobile, the plugin version, the plan mode and rough size, the options in use and how often the main features are used, to better understand how the plugin is used and where to improve it. Nothing about your plan is ever sent, and you stay fully anonymous.',
@@ -1245,6 +1250,95 @@ function wrapper(plugin_info) {
       width: width,
       closeOnEscape: true
     });
+  };
+
+  // GitHub star prompt: shown once after roughly 2 hours of active use, and once more after 5
+  // hours — "active" meaning the browser tab is visible, counted in whole-minute ticks
+  // (thisplugin.STAR_TIP_TICK_SECONDS) rather than wall-clock time, so a tab left open and
+  // forgotten in the background doesn't count. Each threshold fires at most once ever, tracked
+  // by thisplugin.STAR_TIP_SHOWN_KEY, independently of usage stats (thisplugin.initUsageStats)
+  // so this still works even when that's unavailable (no Web Crypto, no window.PLAYER yet).
+  //
+  // To try the dialog itself right away, from the console: window.plugin.fanfields.showStarTipDialog();
+  // To test the full time-based flow without actually waiting, lower the thresholds first, e.g.
+  // window.plugin.fanfields.STAR_TIP_THRESHOLDS_S = [10, 20]; — the next tick (within
+  // STAR_TIP_TICK_SECONDS) then shows it for real. localStorage.removeItem('plugin-fanfields3-startip-shown')
+  // (and the matching -active-seconds key) resets a threshold already marked as shown.
+  thisplugin.STAR_TIP_ACTIVE_SECONDS_KEY = 'plugin-fanfields3-startip-active-seconds';
+  thisplugin.STAR_TIP_SHOWN_KEY = 'plugin-fanfields3-startip-shown';
+  thisplugin.STAR_TIP_THRESHOLDS_S = [2 * 60 * 60, 5 * 60 * 60];
+  thisplugin.STAR_TIP_TICK_SECONDS = 60;
+  thisplugin.STAR_TIP_URL = 'https://github.com/Avataar120/fanfields3';
+  thisplugin._starTipTimer = null;
+
+  thisplugin.getStarTipShownThresholds = function () {
+    try {
+      var stored = JSON.parse(localStorage.getItem(thisplugin.STAR_TIP_SHOWN_KEY) || '[]');
+      return Array.isArray(stored) ? stored : [];
+    } catch (e) {
+      return [];
+    }
+  };
+
+  thisplugin.showStarTipDialog = function () {
+    var width = Math.min(420, thisplugin.getMaxDialogWidth());
+    dialog({
+      html: '<p>You\'ve been planning with Fan Fields 3 for a good while now. If it\'s been useful to you, ' +
+        'a star on GitHub helps other Ingress agents discover it too — and it only takes a couple of clicks.</p>' +
+        '<p><b>How to star it:</b> on the repository page, click the <b>&#9734; Star</b> button near the top ' +
+        'right (sign in to GitHub first if asked).</p>',
+      id: 'plugin_fanfields3_alert_startip',
+      title: 'Fan Fields 3 - Enjoying it?',
+      width: width,
+      closeOnEscape: true
+    });
+
+    $('#dialog-plugin_fanfields3_alert_startip').dialog('option', 'buttons', {
+      Great: function () {
+        window.open(thisplugin.STAR_TIP_URL, '_blank');
+        $(this).dialog('close');
+      },
+      'Not now': function () {
+        $(this).dialog('close');
+      }
+    });
+  };
+
+  // One tick of active time: adds it to the running total and, the first time this crosses one
+  // or more thresholds, shows the dialog once and marks every threshold crossed by this same
+  // tick as shown — so a tick that happens to jump past more than one at once (only plausible in
+  // testing, by seeding a large active-seconds value directly) still only ever shows a single
+  // dialog, never one per threshold, and never shows again for a threshold already passed.
+  thisplugin.tickStarTip = function () {
+    var total = (parseInt(localStorage.getItem(thisplugin.STAR_TIP_ACTIVE_SECONDS_KEY), 10) || 0) +
+      thisplugin.STAR_TIP_TICK_SECONDS;
+    localStorage.setItem(thisplugin.STAR_TIP_ACTIVE_SECONDS_KEY, String(total));
+
+    var shown = thisplugin.getStarTipShownThresholds();
+    var due = thisplugin.STAR_TIP_THRESHOLDS_S.filter(function (threshold) {
+      return total >= threshold && shown.indexOf(threshold) === -1;
+    });
+    if (!due.length) return;
+
+    localStorage.setItem(thisplugin.STAR_TIP_SHOWN_KEY, JSON.stringify(shown.concat(due)));
+    thisplugin.showStarTipDialog();
+  };
+
+  thisplugin._startStarTipTicking = function () {
+    if (thisplugin._starTipTimer) return;
+    thisplugin._starTipTimer = setInterval(thisplugin.tickStarTip, thisplugin.STAR_TIP_TICK_SECONDS * 1000);
+  };
+  thisplugin._stopStarTipTicking = function () {
+    clearInterval(thisplugin._starTipTimer);
+    thisplugin._starTipTimer = null;
+  };
+
+  thisplugin.initStarTip = function () {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') thisplugin._startStarTipTicking();
+      else thisplugin._stopStarTipTicking();
+    });
+    if (document.visibilityState === 'visible') thisplugin._startStarTipTicking();
   };
 
 
@@ -10488,6 +10582,7 @@ function wrapper(plugin_info) {
     window.addLayerGroup('Fanfields numbers', thisplugin.numbersLayerGroup, false);
 
     thisplugin.initUsageStats();
+    thisplugin.initStarTip();
 
     //window.map.on('zoomend', thisplugin.clearAllPortalLabels );
   };
