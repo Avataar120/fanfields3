@@ -311,6 +311,41 @@
         <h2>By region</h2>
         <div id="byRegion"></div>
       </div>
+
+      <div class="card">
+        <div class="agents-head">
+          <h2>Agents</h2>
+          <div class="agents-tools">
+            <label>Show
+              <select id="agentsTop">
+                <option value="10">Top 10</option>
+                <option value="25">Top 25</option>
+                <option value="50">Top 50</option>
+                <option value="0">All</option>
+              </select>
+            </label>
+            <label>Sort by
+              <select id="agentsSort"></select>
+            </label>
+            <label>Version
+              <select id="agentsVersion">
+                <option value="all">All versions</option>
+              </select>
+            </label>
+            <button type="button" id="agentsCsv" class="ghost small">Export CSV</button>
+          </div>
+        </div>
+        <p class="muted agents-hint">Filters keep only agents who used every selected item in this range. Click a row for details.</p>
+        <div class="chips" id="agentsChips"></div>
+        <div class="adoption" id="agentsAdoption"></div>
+        <div class="table-wrap">
+          <table class="agents" id="agentsTable">
+            <thead><tr id="agentsHeadRow"></tr></thead>
+            <tbody id="agentsBody"></tbody>
+          </table>
+        </div>
+        <p class="muted agents-footnote">Time split percentages only cover pings sent by plugin 7.1.0 or later.</p>
+      </div>
     </section>
   </main>
 

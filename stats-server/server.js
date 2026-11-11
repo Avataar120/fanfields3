@@ -1,5 +1,7 @@
 // FanFields 3 usage stats server : collects anonymous presence pings from the plugin (hashed
-// agent id, faction — nothing else) and serves an admin dashboard to review them.
+// agent id, faction, and from protocol v2 on, anonymous usage details: platform, plugin
+// version, plan mode/size, which options are on and which features were used since the
+// previous ping — never any plan content) and serves an admin dashboard to review them.
 // Aucune dépendance externe (Node >= 18), même approche que le serveur iitc-sync voisin.
 //
 // Le plugin envoie un ping "je suis là" à chaque changement de visibilité (visible/caché) et
@@ -32,9 +34,27 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://intel.ingress.com'
 
 // ---- Limites ----
 const MAX_BODY = 4 * 1024;
-const PROTOCOL_VERSION = 1;
+// v1 : présence seule (agent, faction). v2 : présence + détails d'usage (voir normalizeDetails).
+// Les deux restent acceptées : un joueur qui n'a pas mis à jour le plugin continue de compter.
+const PROTOCOL_VERSIONS = [1, 2];
 const AGENT_HASH_RE = /^[0-9a-f]{64}$/; // HMAC-SHA256 hex, calculé côté client (voir le plugin)
 const FACTIONS = ['ENL', 'RES'];
+
+// ---- Détails d'usage (protocole v2) ----
+// Listes fermées : toute valeur inconnue est simplement ignorée, jamais stockée telle quelle.
+// L'état (plateforme, mode, taille du plan, options actives) décrit le plugin au moment du ping
+// et se voit attribuer les secondes de ce ping ; les compteurs `used` sont les actions faites
+// depuis le ping précédent.
+const PLATFORMS = ['desktop', 'mobile'];
+const MODES = ['fan', 'herringbone'];
+const PLAN_SIZES = ['0', '1-10', '11-25', '26-50', '50+'];
+const STATE_FLAGS = ['taskList', 'spendKeys', 'sync', 'blockers', 'bookmarksOnly'];
+const USAGE_COUNTERS = [
+  'taskList', 'taskRefresh', 'reroute', 'keysVideo', 'ops', 'opSave', 'opLoad',
+  'printRoute', 'printPlan', 'portalRoute', 'walkSim', 'exclude', 'anchor', 'stats', 'activityRefresh'
+];
+const VERSION_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const MAX_USAGE_PER_PING = 1000;
 // Écart maximum entre deux pings consécutifs d'un même agent pour que l'écart compte comme du
 // temps actif continu (le plugin re-ping toutes les 60 s tant qu'il est visible, donc une marge
 // large face à la gigue réseau/du minuteur). Au-delà, le plugin a été refermé entre les deux :
@@ -90,6 +110,35 @@ function regionForIp(ip) {
     if (geoStarts[mid] <= n) lo = mid; else hi = mid - 1;
   }
   return REGIONS[geoRegionIds[lo]];
+}
+
+// Ne garde des détails v2 que les valeurs connues (voir les listes ci-dessus). Sert à la fois à
+// l'entrée (handleCollect, corps envoyé par n'importe qui) et à la relecture des fichiers, pour
+// que l'agrégation n'ait jamais à se méfier d'un champ.
+function normalizeDetails(src) {
+  const out = {};
+  if (!src || typeof src !== 'object') return out;
+  if (PLATFORMS.indexOf(src.platform) !== -1) out.platform = src.platform;
+  if (typeof src.version === 'string' && VERSION_RE.test(src.version)) out.version = src.version;
+  if (MODES.indexOf(src.mode) !== -1) out.mode = src.mode;
+  if (PLAN_SIZES.indexOf(src.plan) !== -1) out.plan = src.plan;
+  if (Array.isArray(src.flags)) {
+    const flags = STATE_FLAGS.filter(function (f) { return src.flags.indexOf(f) !== -1; });
+    if (flags.length) out.flags = flags;
+  }
+  if (src.used && typeof src.used === 'object' && !Array.isArray(src.used)) {
+    const used = {};
+    let any = false;
+    USAGE_COUNTERS.forEach(function (k) {
+      const n = src.used[k];
+      if (typeof n === 'number' && Number.isInteger(n) && n > 0) {
+        used[k] = Math.min(n, MAX_USAGE_PER_PING);
+        any = true;
+      }
+    });
+    if (any) out.used = used;
+  }
+  return out;
 }
 
 // IP du client : dernière entrée de X-Forwarded-For, posée par Traefik et non falsifiable par
@@ -246,7 +295,8 @@ function readDayFile(day) {
       const e = JSON.parse(line);
       if (e && AGENT_HASH_RE.test(e.agent) && FACTIONS.indexOf(e.faction) !== -1 &&
         REGIONS.indexOf(e.region) !== -1 && typeof e.seconds === 'number') {
-        out.push(e);
+        out.push(Object.assign({ ts: e.ts, agent: e.agent, faction: e.faction, region: e.region, seconds: e.seconds },
+          normalizeDetails(e)));
       }
     } catch (parseError) { /* ligne corrompue : ignorée */ }
   });
@@ -382,9 +432,79 @@ function activeNow() {
   };
 }
 
+// Une ligne par agent sur la plage demandée (mêmes filtres faction/région, appliqués événement
+// par événement comme dans aggregate) : temps total, répartition du temps par plateforme, mode,
+// taille de plan et option active, compteurs d'actions cumulés, et temps par jour et par
+// plateforme pour le détail d'un agent. Les secondes des pings v1 (sans détails) restent dans
+// `seconds` mais n'entrent dans aucune répartition : `detailedSeconds` est le dénominateur à
+// utiliser pour les pourcentages. Le tri et la sélection se font côté page admin.
+function zeroCounts(keys) {
+  const o = {};
+  keys.forEach(function (k) { o[k] = 0; });
+  return o;
+}
+
+function aggregateAgents(from, to, factionFilter, regionFilter) {
+  const byAgent = new Map();
+  listDays(from, to).forEach(function (day) {
+    readDayFile(day).forEach(function (e) {
+      if ((factionFilter !== 'all' && e.faction !== factionFilter) ||
+        (regionFilter !== 'all' && e.region !== regionFilter)) return;
+      let a = byAgent.get(e.agent);
+      if (!a) {
+        a = {
+          agent: e.agent, faction: e.faction, region: e.region, version: null,
+          seconds: 0, detailedSeconds: 0, pings: 0, firstTs: e.ts, lastTs: e.ts,
+          platform: zeroCounts(PLATFORMS), mode: zeroCounts(MODES), plan: zeroCounts(PLAN_SIZES),
+          flags: zeroCounts(STATE_FLAGS), used: zeroCounts(USAGE_COUNTERS), byDay: {}
+        };
+        byAgent.set(e.agent, a);
+      }
+      a.pings++;
+      a.seconds += e.seconds;
+      if (e.ts < a.firstTs) a.firstTs = e.ts;
+      if (e.ts >= a.lastTs) {
+        a.lastTs = e.ts;
+        a.faction = e.faction;
+        a.region = e.region;
+      }
+      if (e.version) a.version = e.version;
+
+      let d = a.byDay[day];
+      if (!d) d = a.byDay[day] = { seconds: 0, desktop: 0, mobile: 0 };
+      d.seconds += e.seconds;
+
+      if (e.platform) {
+        a.detailedSeconds += e.seconds;
+        a.platform[e.platform] += e.seconds;
+        d[e.platform] += e.seconds;
+      }
+      if (e.mode) a.mode[e.mode] += e.seconds;
+      if (e.plan) a.plan[e.plan] += e.seconds;
+      (e.flags || []).forEach(function (f) { a.flags[f] += e.seconds; });
+      if (e.used) Object.keys(e.used).forEach(function (k) { a.used[k] += e.used[k]; });
+    });
+  });
+
+  const agents = Array.from(byAgent.values()).map(function (a) {
+    a.daysActive = Object.keys(a.byDay).length;
+    a.byDay = Object.keys(a.byDay).sort().map(function (date) {
+      return Object.assign({ date: date }, a.byDay[date]);
+    });
+    return a;
+  });
+  agents.sort(function (x, y) { return y.seconds - x.seconds; });
+  return {
+    from: from,
+    to: to,
+    keys: { platforms: PLATFORMS, modes: MODES, planSizes: PLAN_SIZES, flags: STATE_FLAGS, used: USAGE_COUNTERS },
+    agents: agents
+  };
+}
+
 // ---- Routes publiques ----
 function handleCollect(req, res, body) {
-  if (body.v !== PROTOCOL_VERSION) return send(res, 426, { error: 'upgrade required' });
+  if (PROTOCOL_VERSIONS.indexOf(body.v) === -1) return send(res, 426, { error: 'upgrade required' });
 
   const agent = String(body.agent || '').toLowerCase();
   if (!AGENT_HASH_RE.test(agent)) return send(res, 400, { error: 'invalid agent' });
@@ -407,7 +527,8 @@ function handleCollect(req, res, body) {
   const region = regionForIp(ip);
   lastSeen.set(agent, { ts: now, region: region });
 
-  appendEvent({ ts: now, agent: agent, faction: faction, region: region, seconds: seconds });
+  const details = body.v >= 2 ? normalizeDetails(body) : {};
+  appendEvent(Object.assign({ ts: now, agent: agent, faction: faction, region: region, seconds: seconds }, details));
   send(res, 204);
 }
 
@@ -466,13 +587,14 @@ function handleAdminApi(req, res, route, body) {
     return send(res, 200, activeNow());
   }
 
-  if (route === 'stats') {
+  if (route === 'stats' || route === 'agents') {
     const today = new Date().toISOString().slice(0, 10);
     const from = DATE_RE.test(body.from) ? body.from : dayKeyFromTs(Date.now() - 29 * 24 * 60 * 60 * 1000);
     const to = DATE_RE.test(body.to) ? body.to : today;
     if (from > to) return send(res, 400, { error: 'invalid range' });
     const factionFilter = FACTIONS.indexOf(body.faction) !== -1 ? body.faction : 'all';
     const regionFilter = REGIONS.indexOf(body.region) !== -1 ? body.region : 'all';
+    if (route === 'agents') return send(res, 200, aggregateAgents(from, to, factionFilter, regionFilter));
     const result = aggregate(from, to, factionFilter, regionFilter);
     result.admin = { user: admin.user };
     return send(res, 200, result);
@@ -592,4 +714,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { aggregate: aggregate, appendEvent: appendEvent, EVENTS_DIR: EVENTS_DIR };
+module.exports = {
+  aggregate: aggregate,
+  aggregateAgents: aggregateAgents,
+  appendEvent: appendEvent,
+  handleCollect: handleCollect,
+  normalizeDetails: normalizeDetails,
+  EVENTS_DIR: EVENTS_DIR
+};
