@@ -3,7 +3,7 @@
 // @id              fanfields@avataar120
 // @name            Fan Fields 3
 // @category        Layer
-// @version         7.0.1.20261019
+// @version         7.1.0.20261111
 // @description     Draw a polygon around a handful of portals and get an instant, maximized fielding plan. Import your keys straight from Ingress -- even without a Core subscription. Predict and optimize your walking route, and much more. Pair it with the Simple Cloud Sync plugin to keep all your devices connected and perfectly in sync, with full privacy guaranteed.
 // @downloadURL     https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.user.js
 // @updateURL       https://github.com/Avataar120/fanfields3/raw/master/iitc_plugin_fanfields3.meta.js
@@ -25,13 +25,18 @@ function wrapper(plugin_info) {
   // ensure plugin framework is there, even if iitc is not yet loaded
   if (typeof window.plugin !== 'function') window.plugin = function () {};
   plugin_info.buildName = 'main';
-  plugin_info.dateTimeVersion = '2026-10-19-120000';
+  plugin_info.dateTimeVersion = '2026-11-11-155745';
   plugin_info.pluginId = 'fanfields';
 
   /* global L, $, dialog, map, portals, links, plugin  -- eslint*/
   /* exported setup, changelog -- eslint */
 
   var changelog = [{
+      version: '7.1.0',
+      changes: [
+        'IMPROVE: The anonymous usage data the plugin sends now also covers desktop or mobile, the plugin version, the plan mode and rough size, the options in use and how often the main features are used, to better understand how the plugin is used and where to improve it. Nothing about your plan is ever sent, and you stay fully anonymous.',
+      ],
+    },{
       version: '7.0.1',
       changes: [
         'FIX: Outbound Fan Field plans sometimes only closed one of a pair of fields that should have closed together, because the anchor was walked last instead of before the links that depend on it. The walk order now visits the anchor earlier and is guaranteed to close every double field it plans, while still following the usual fan field capture route instead of backtracking.',
