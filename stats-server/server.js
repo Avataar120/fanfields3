@@ -54,6 +54,12 @@ const USAGE_COUNTERS = [
   'printRoute', 'printPlan', 'portalRoute', 'walkSim', 'exclude', 'anchor', 'stats', 'activityRefresh'
 ];
 const VERSION_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+// Toutes les versions du plugin ayant jamais existé depuis que le ping envoie `version` (depuis
+// la 7.1.0 -- voir le changelog du plugin) : tenue à jour manuellement à chaque publication. Un
+// ping qui revendique un numéro hors de cette liste n'est pas un simple format invalide, c'est un
+// plugin qui n'est pas celui publié par ce dépôt (fork non officiel, numéro de version inventé) :
+// il est rejeté entièrement par handleCollect plutôt que simplement ignoré.
+const KNOWN_VERSIONS = ['7.1.0', '7.1.1', '7.1.2'];
 const MAX_USAGE_PER_PING = 1000;
 // Écart maximum entre deux pings consécutifs d'un même agent pour que l'écart compte comme du
 // temps actif continu (le plugin re-ping toutes les 60 s tant qu'il est visible, donc une marge
@@ -505,6 +511,10 @@ function aggregateAgents(from, to, factionFilter, regionFilter) {
 // ---- Routes publiques ----
 function handleCollect(req, res, body) {
   if (PROTOCOL_VERSIONS.indexOf(body.v) === -1) return send(res, 426, { error: 'upgrade required' });
+
+  if (typeof body.version === 'string' && body.version !== '' && KNOWN_VERSIONS.indexOf(body.version) === -1) {
+    return send(res, 403, { error: 'unknown version' });
+  }
 
   const agent = String(body.agent || '').toLowerCase();
   if (!AGENT_HASH_RE.test(agent)) return send(res, 400, { error: 'invalid agent' });

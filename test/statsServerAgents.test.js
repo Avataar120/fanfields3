@@ -61,6 +61,14 @@ test('handleCollect: accepts v1 and v2, rejects unknown protocol versions', () =
   assert.equal(collect(server, { v: 3, agent: AGENT_B, faction: 'RES' }), 426);
 });
 
+test('handleCollect: rejects a well-formed but unpublished version, accepts known ones', () => {
+  const server = loadServerWithFreshDataDir();
+  assert.equal(collect(server, { v: 2, agent: AGENT_A, faction: 'ENL', version: '7.1.1' }), 204);
+  assert.equal(collect(server, { v: 2, agent: AGENT_B, faction: 'RES', version: '99.0.0' }), 403);
+  // No version at all (older client) still goes through, same as before this check existed.
+  assert.equal(collect(server, { v: 1, agent: AGENT_A, faction: 'ENL' }), 204);
+});
+
 test('handleCollect: stores v2 details sanitized, and no details for v1 pings', () => {
   const server = loadServerWithFreshDataDir();
   collect(server, { v: 1, agent: AGENT_A, faction: 'ENL', platform: 'mobile' });
