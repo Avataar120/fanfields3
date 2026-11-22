@@ -238,7 +238,6 @@ button:disabled { opacity: .6; cursor: default; }
 }
 .history-bar {
   flex: 1;
-  min-width: 2px;
   background: var(--bar);
   border-radius: 2px 2px 0 0;
   position: relative;

@@ -965,7 +965,7 @@
     });
 
     initAgents();
-    applyPreset(30);
+    applyPreset(182);
 
     $('loginForm').addEventListener('submit', submitLogin);
     $('passwordForm').addEventListener('submit', submitPassword);
